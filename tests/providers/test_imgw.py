@@ -31,8 +31,8 @@ from satellitehub.providers.imgw import (
     _STATUS_TIMEOUT,
     _SUCCESS_STATUS_CODES,
     _SUPPORTED_STATION_TYPE,
-    _haversine_distance,
     IMGWProvider,
+    _haversine_distance,
 )
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ class TestIMGWConstants:
 
     def test_imgw_synop_url_defined(self) -> None:
         """IMGW synop URL constant is defined."""
-        assert _IMGW_SYNOP_URL == f"{_IMGW_API_URL}/synop"
+        assert f"{_IMGW_API_URL}/synop" == _IMGW_SYNOP_URL
 
     def test_supported_station_type_defined(self) -> None:
         """Supported station type is defined (MVP: synoptic only)."""
@@ -617,9 +617,8 @@ class TestIMGWRetryLogic:
         error_resp.status_code = 500
         provider._session.request = MagicMock(return_value=error_resp)
 
-        with patch("time.sleep"):  # Skip actual sleep
-            with pytest.raises(ProviderError) as exc_info:
-                provider._retry_request("get", "http://test.com")
+        with patch("time.sleep"), pytest.raises(ProviderError) as exc_info:
+            provider._retry_request("get", "http://test.com")
 
         assert "after retries" in str(exc_info.value).lower()
 

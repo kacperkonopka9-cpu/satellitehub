@@ -541,7 +541,7 @@ class CDSEProvider(DataProvider):
                 download_size = buf.tell()
                 buf.seek(0)
                 break  # Success
-            except (requests.RequestException, IOError) as exc:
+            except (OSError, requests.RequestException) as exc:
                 last_exc = exc
                 if attempt < _MAX_RETRIES - 1:
                     backoff = min(_INITIAL_BACKOFF * (2**attempt), _MAX_BACKOFF)

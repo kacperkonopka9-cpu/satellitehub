@@ -15,7 +15,6 @@ from satellitehub.exceptions import ConfigurationError, ProviderError
 from satellitehub.location import Location, location
 from satellitehub.results import BaseResult, WeatherResult
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -303,13 +302,13 @@ class TestLocationBounds:
     """Test Location.bounds property."""
 
     def test_bounds_returns_tuple(self, test_location: Location) -> None:
-        """bounds returns a 4-tuple."""
+        """Bounds returns a 4-tuple."""
         bounds = test_location.bounds
         assert isinstance(bounds, tuple)
         assert len(bounds) == 4
 
     def test_bounds_contains_coordinates(self, test_location: Location) -> None:
-        """bounds contains the location coordinates."""
+        """Bounds contains the location coordinates."""
         bounds = test_location.bounds
         # For a point, bounds are (lon, lat, lon, lat)
         assert bounds[0] == test_location.lon  # minx

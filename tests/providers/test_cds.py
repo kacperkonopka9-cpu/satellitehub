@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -129,7 +128,7 @@ class TestCDSConstants:
 
     def test_cds_resources_url_defined(self) -> None:
         """CDS resources URL constant is defined."""
-        assert _CDS_RESOURCES_URL == f"{_CDS_API_URL}/resources"
+        assert f"{_CDS_API_URL}/resources" == _CDS_RESOURCES_URL
 
     def test_timeout_constants_defined(self) -> None:
         """Timeout constants are defined per NFR13."""
@@ -424,17 +423,18 @@ class TestCDSDownload:
         )
 
         # Mock _submit_request to return a task ID
-        with patch.object(provider, "_submit_request", return_value="task-123"):
-            # Mock _poll_queue to raise timeout
-            with patch.object(provider, "_poll_queue") as mock_poll:
-                mock_poll.side_effect = ProviderError(
-                    what="ERA5 request timed out",
-                    cause="CDS queue exceeded 2-minute budget",
-                    fix="Try again later or during off-peak hours",
-                )
+        with (
+            patch.object(provider, "_submit_request", return_value="task-123"),
+            patch.object(provider, "_poll_queue") as mock_poll,
+        ):
+            mock_poll.side_effect = ProviderError(
+                what="ERA5 request timed out",
+                cause="CDS queue exceeded 2-minute budget",
+                fix="Try again later or during off-peak hours",
+            )
 
-                with pytest.raises(ProviderError) as exc_info:
-                    provider.download(entry)
+            with pytest.raises(ProviderError) as exc_info:
+                provider.download(entry)
 
                 assert "ERA5 request timed out" in str(exc_info.value)
                 assert "2-minute budget" in str(exc_info.value)
@@ -648,9 +648,8 @@ class TestCDSRetryLogic:
         error_resp.status_code = 500
         provider._session.request = MagicMock(return_value=error_resp)
 
-        with patch("time.sleep"):  # Skip actual sleep
-            with pytest.raises(ProviderError) as exc_info:
-                provider._retry_request("get", "http://test.com")
+        with patch("time.sleep"), pytest.raises(ProviderError) as exc_info:
+            provider._retry_request("get", "http://test.com")
 
         assert "after retries" in str(exc_info.value).lower()
 
