@@ -33,7 +33,8 @@ jobs:
 
       - name: Type check with mypy
         run: |
-          mypy src/satellitehub --strict
+          mypy --version
+          mypy src/satellitehub --strict --show-error-codes
 
       - name: Run tests
         run: |
