@@ -615,7 +615,7 @@ class CDSEProvider(DataProvider):
 
         band_arrays: list[npt.NDArray[np.floating[Any]]] = []
         extracted_bands: list[str] = []
-        target_shape: tuple[int, int] | None = None
+        target_shape: tuple[int, ...] | None = None
 
         with zf:
             names = zf.namelist()

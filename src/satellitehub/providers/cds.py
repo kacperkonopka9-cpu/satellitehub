@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import numpy.typing as npt
 import requests
 
 from satellitehub._types import RawData
@@ -478,7 +479,7 @@ class CDSProvider(DataProvider):
 
             time.sleep(_POLL_INTERVAL)
 
-    def _download_result(self, download_url: str) -> np.ndarray:
+    def _download_result(self, download_url: str) -> npt.NDArray[np.floating[Any]]:
         """Download result file from CDS.
 
         Args:
