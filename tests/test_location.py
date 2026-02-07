@@ -485,6 +485,124 @@ class TestDataTierAccess:
         assert len(result.warnings) == 1
         assert "Missing credentials" in result.warnings[0]
 
+    # ── DataTier.landsat() tests ──────────────────────────────────────────
+
+    def test_landsat_returns_base_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loc = location(lat=51.25, lon=22.57)
+        test_data = np.ones((2, 10, 10), dtype=np.float32)
+        raw = RawData(
+            data=test_data,
+            metadata={
+                "timestamp": "2024-01-01T10:00:00Z",
+                "bands": ["B4", "B5"],
+                "cloud_cover_pct": 15.0,
+            },
+        )
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(
+            _pl,
+            "_acquire",
+            lambda location, provider_name, product, bands, cloud_max, last_days: raw,
+        )
+
+        result = loc.data.landsat(bands=["B4", "B5"])
+        assert isinstance(result, BaseResult)
+        assert result.confidence == 1.0
+        assert result.data.shape == (2, 10, 10)
+        assert result.metadata.source == "landsat"
+
+    def test_landsat_empty_result_zero_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loc = location(lat=51.25, lon=22.57)
+        empty_raw = RawData(data=np.array([], dtype=np.float32), metadata={})
+
+        def fake_acquire(
+            location: object,
+            provider_name: str,
+            product: str,
+            bands: object,
+            cloud_max: float,
+            last_days: int,
+        ) -> RawData:
+            return empty_raw
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(_pl, "_acquire", fake_acquire)
+
+        result = loc.data.landsat()
+        assert result.confidence == 0.0
+        assert result.data.size == 0
+        assert len(result.warnings) == 1
+        assert "No Landsat data found" in result.warnings[0]
+
+    def test_landsat_provider_error_returns_zero_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loc = location(lat=51.25, lon=22.57)
+
+        import satellitehub._pipeline as _pl
+
+        def raise_provider_error(
+            location: object,
+            provider_name: str,
+            product: str,
+            bands: object,
+            cloud_max: float,
+            last_days: int,
+        ) -> None:
+            raise ProviderError(
+                what="Planetary Computer unreachable",
+                cause="Timeout",
+                fix="Retry",
+            )
+
+        monkeypatch.setattr(_pl, "_acquire", raise_provider_error)
+
+        result = loc.data.landsat()
+        assert result.confidence == 0.0
+        assert len(result.warnings) == 1
+        assert "Planetary Computer unreachable" in result.warnings[0]
+
+    def test_landsat_accepts_bands_parameter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loc = location(lat=51.25, lon=22.57)
+        test_data = np.ones((3, 10, 10), dtype=np.float32)
+        raw = RawData(
+            data=test_data,
+            metadata={"bands": ["B4", "B5", "B6"]},
+        )
+
+        import satellitehub._pipeline as _pl
+
+        captured_kwargs: dict[str, object] = {}
+
+        def capture_acquire(
+            location: object,
+            provider_name: str,
+            product: str,
+            bands: object,
+            cloud_max: float,
+            last_days: int,
+        ) -> RawData:
+            captured_kwargs["bands"] = bands
+            captured_kwargs["cloud_max"] = cloud_max
+            captured_kwargs["last_days"] = last_days
+            return raw
+
+        monkeypatch.setattr(_pl, "_acquire", capture_acquire)
+
+        loc.data.landsat(bands=["B4", "B5", "B6"], cloud_max=0.2, last_days=90)
+        assert captured_kwargs["bands"] == ["B4", "B5", "B6"]
+        assert captured_kwargs["cloud_max"] == 0.2
+        assert captured_kwargs["last_days"] == 90
+
 
 # ── available_data() ──────────────────────────────────────────────────
 

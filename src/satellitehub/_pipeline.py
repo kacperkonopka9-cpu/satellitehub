@@ -368,6 +368,7 @@ def _acquire(
     _credential_map: dict[str, Path | None] = {
         "cdse": config.copernicus_credentials,
         "cds": config.cds_credentials,
+        "landsat": None,  # Planetary Computer is public, no auth needed
     }
     creds_path = resolve_credentials_path(
         explicit=_credential_map.get(provider_name),

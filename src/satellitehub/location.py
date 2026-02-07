@@ -374,6 +374,84 @@ class DataTier:
             metadata=result_meta,
         )
 
+    def landsat(
+        self,
+        bands: list[str] | None = None,
+        cloud_max: float = 0.3,
+        last_days: int = 60,
+    ) -> BaseResult:
+        """Retrieve raw Landsat 8/9 L2 bands for this location.
+
+        Acquires Landsat Collection 2 Level-2 surface reflectance data
+        through the Planetary Computer STAC API. No authentication required.
+
+        Data availability issues return a zero-confidence result with
+        warnings — this method never raises on missing data.
+
+        Args:
+            bands: Specific band identifiers to download (e.g.,
+                ``["B4", "B5"]``). Downloads default bands if ``None``.
+                Available: B1-B7, QA_PIXEL.
+            cloud_max: Maximum acceptable cloud cover fraction (0.0--1.0).
+                Defaults to 0.3 (30%).
+            last_days: Number of days to look back from today. Defaults to 60.
+
+        Returns:
+            ``BaseResult`` with raw band data, confidence, and metadata.
+
+        Example:
+            >>> field = location(lat=51.25, lon=22.57)
+            >>> result = field.data.landsat(bands=["B4", "B5"])
+            >>> result.confidence  # doctest: +SKIP
+            0.85
+        """
+        from satellitehub._pipeline import _acquire
+
+        try:
+            raw = _acquire(
+                location=self._location,
+                provider_name="landsat",
+                product="landsat-c2-l2",
+                bands=bands,
+                cloud_max=cloud_max,
+                last_days=last_days,
+            )
+        except (ProviderError, ConfigurationError) as exc:
+            logger.warning("Landsat data acquisition failed: %s", exc)
+            return BaseResult(
+                data=np.array([], dtype=np.float32),
+                confidence=0.0,
+                metadata=ResultMetadata(source="landsat"),
+                warnings=[str(exc)],
+            )
+
+        # Empty result from pipeline (no catalog entries)
+        if raw.data.size == 0:
+            return BaseResult(
+                data=raw.data,
+                confidence=0.0,
+                metadata=ResultMetadata(source="landsat"),
+                warnings=[
+                    "No Landsat data found for the requested location and time range"
+                ],
+            )
+
+        # Build metadata from provider's download response
+        meta = raw.metadata
+        result_meta = ResultMetadata(
+            source="landsat",
+            timestamps=[meta.get("timestamp", "")],
+            observation_count=1,
+            cloud_cover_pct=meta.get("cloud_cover_pct", 0.0),
+            bands=meta.get("bands", []),
+        )
+
+        return BaseResult(
+            data=raw.data,
+            confidence=1.0,
+            metadata=result_meta,
+        )
+
 
 class Location:
     """A geographic location for satellite data queries.

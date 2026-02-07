@@ -97,6 +97,7 @@ raw_data = provider.download(entries[0], bands=["B04", "B08"])
 | Provider | Data | Registration |
 |----------|------|--------------|
 | CDSE | Sentinel-2 L2A imagery | [Copernicus](https://dataspace.copernicus.eu/) |
+| Landsat | Landsat 8/9 L2 imagery | No registration needed |
 | CDS | ERA5 weather reanalysis | [CDS](https://cds.climate.copernicus.eu/) |
 | IMGW | Polish weather stations | No registration needed |
 
