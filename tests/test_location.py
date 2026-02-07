@@ -495,7 +495,7 @@ class TestAvailableData:
 
     def _inject_mock_provider(self, loc: Location, mock_provider: MagicMock) -> None:
         """Pre-populate the Location._providers cache with mock providers."""
-        for name in ("cdse", "cds", "imgw"):
+        for name in ("cdse", "cds", "imgw", "landsat"):
             loc._providers[name] = mock_provider
 
     def test_returns_summary_dict(self) -> None:
@@ -524,8 +524,8 @@ class TestAvailableData:
         assert "total_passes" in summary
         assert "date_range" in summary
         assert "warnings" in summary
-        # 3 providers x 2 entries each = 6 total
-        assert summary["total_passes"] == 6
+        # 4 providers x 2 entries each = 8 total (cdse, cds, imgw, landsat)
+        assert summary["total_passes"] == 8
 
     def test_provider_error_adds_warning(self) -> None:
         loc = location(lat=51.25, lon=22.57)

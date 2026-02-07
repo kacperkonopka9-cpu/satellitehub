@@ -11,6 +11,7 @@ from satellitehub.providers.base import DataProvider
 from satellitehub.providers.cds import CDSProvider
 from satellitehub.providers.cdse import CDSEProvider
 from satellitehub.providers.imgw import IMGWProvider
+from satellitehub.providers.landsat import LandsatProvider
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +50,10 @@ class TestRegistryReturns:
         provider = get_provider("imgw", Config())
         assert isinstance(provider, IMGWProvider)
 
+    def test_landsat_returns_landsat_provider(self) -> None:
+        provider = get_provider("landsat", Config())
+        assert isinstance(provider, LandsatProvider)
+
     def test_returns_data_provider_instance(self) -> None:
         provider = get_provider("cdse", Config())
         assert isinstance(provider, DataProvider)
@@ -77,6 +82,10 @@ class TestCaseInsensitive:
         provider = get_provider("IMGW", Config())
         assert isinstance(provider, IMGWProvider)
 
+    def test_uppercase_landsat(self) -> None:
+        provider = get_provider("LANDSAT", Config())
+        assert isinstance(provider, LandsatProvider)
+
 
 # ── Unknown provider ─────────────────────────────────────────────────
 
@@ -96,6 +105,7 @@ class TestUnknownProvider:
         assert "cds" in msg
         assert "cdse" in msg
         assert "imgw" in msg
+        assert "landsat" in msg
 
     def test_error_includes_unknown_name(self) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
@@ -134,6 +144,10 @@ class TestProviderConfigAndName:
     def test_imgw_provider_has_correct_name(self) -> None:
         provider = get_provider("imgw", Config())
         assert provider.name == "imgw"
+
+    def test_landsat_provider_has_correct_name(self) -> None:
+        provider = get_provider("landsat", Config())
+        assert provider.name == "landsat"
 
     def test_each_call_returns_new_instance(self) -> None:
         cfg = Config()

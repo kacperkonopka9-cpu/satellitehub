@@ -17,6 +17,7 @@ from satellitehub.providers.base import (
 from satellitehub.providers.cds import CDSProvider
 from satellitehub.providers.cdse import CDSEProvider
 from satellitehub.providers.imgw import IMGWProvider
+from satellitehub.providers.landsat import LandsatProvider
 
 
 @pytest.fixture(autouse=True)
@@ -224,6 +225,26 @@ class TestConcreteProviders:
 
     def test_imgw_implements_all_methods(self) -> None:
         provider = IMGWProvider(config=Config())
+        assert hasattr(provider, "authenticate")
+        assert hasattr(provider, "search")
+        assert hasattr(provider, "download")
+        assert hasattr(provider, "check_status")
+
+    def test_landsat_instantiates(self) -> None:
+        provider = LandsatProvider(config=Config())
+        assert isinstance(provider, DataProvider)
+
+    def test_landsat_has_name(self) -> None:
+        provider = LandsatProvider(config=Config())
+        assert provider.name == "landsat"
+
+    def test_landsat_stores_config(self) -> None:
+        cfg = Config()
+        provider = LandsatProvider(config=cfg)
+        assert provider._config is cfg
+
+    def test_landsat_implements_all_methods(self) -> None:
+        provider = LandsatProvider(config=Config())
         assert hasattr(provider, "authenticate")
         assert hasattr(provider, "search")
         assert hasattr(provider, "download")

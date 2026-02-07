@@ -12,7 +12,7 @@ license = "MIT"
 authors = [
     { name = "Kacper Konopka", email = "kacper.konopka9@gmail.com" },
 ]
-keywords = ["satellite", "sentinel-2", "ndvi", "geospatial", "remote-sensing"]
+keywords = ["satellite", "sentinel-2", "landsat", "ndvi", "geospatial", "remote-sensing"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.10",
@@ -53,7 +53,7 @@ select = ["E", "F", "W", "I", "D", "UP", "N", "S", "B", "A", "C4", "SIM"]
 ignore = ["D100", "D104"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "D102", "D103"]
+"tests/**" = ["S101", "S105", "S106", "D102", "D103", "SIM117"]
 "src/satellitehub/providers/cdse.py" = ["S105"]  # _TOKEN_URL triggers false positive
 "scripts/**" = ["E501"]  # HTML template strings have long lines
 

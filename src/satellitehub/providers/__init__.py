@@ -1,8 +1,8 @@
 """Provider registry for data source access.
 
 Provides ``get_provider()`` to instantiate configured provider
-instances by name. Supports CDSE (Sentinel-2), CDS (ERA5), and
-IMGW (Polish weather).
+instances by name. Supports CDSE (Sentinel-2), CDS (ERA5),
+IMGW (Polish weather), and Landsat (Landsat 8/9 via Planetary Computer).
 """
 
 from __future__ import annotations
@@ -24,12 +24,14 @@ def _init_registry() -> None:
     from satellitehub.providers.cds import CDSProvider
     from satellitehub.providers.cdse import CDSEProvider
     from satellitehub.providers.imgw import IMGWProvider
+    from satellitehub.providers.landsat import LandsatProvider
 
     _PROVIDER_REGISTRY.update(
         {
             "cdse": CDSEProvider,
             "cds": CDSProvider,
             "imgw": IMGWProvider,
+            "landsat": LandsatProvider,
         }
     )
     _REGISTRY_INITIALIZED = True
@@ -54,7 +56,7 @@ def get_provider(name: str, config: Config) -> DataProvider:
     Provider names are case-insensitive.
 
     Args:
-        name: Provider identifier (``"cdse"``, ``"cds"``, or ``"imgw"``).
+        name: Provider identifier (``"cdse"``, ``"cds"``, ``"imgw"``, or ``"landsat"``).
         config: Frozen configuration snapshot from the Location.
 
     Returns:
