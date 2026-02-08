@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 import pytest
 import requests
 
@@ -106,11 +107,33 @@ def _mock_queue_running_response() -> MagicMock:
     return resp
 
 
+def _create_minimal_netcdf_bytes() -> bytes:
+    """Create minimal valid NetCDF bytes for testing."""
+    import io
+
+    import xarray as xr
+
+    # Create minimal dataset
+    times = pd.date_range("2024-01-15", periods=2, freq="6h")
+    ds = xr.Dataset(
+        {
+            "t2m": (["time"], np.array([280.0, 281.0])),
+            "tp": (["time"], np.array([0.001, 0.002])),
+        },
+        coords={"time": times},
+    )
+
+    buffer = io.BytesIO()
+    ds.to_netcdf(buffer, engine="h5netcdf")
+    buffer.seek(0)
+    return buffer.read()
+
+
 def _mock_download_success_response() -> MagicMock:
-    """Return a mock Response for successful download."""
+    """Return a mock Response for successful download with valid NetCDF."""
     resp = MagicMock(spec=requests.Response)
     resp.status_code = 200
-    resp.content = b"\x00" * 1000  # Dummy binary data
+    resp.content = _create_minimal_netcdf_bytes()
     return resp
 
 
@@ -827,3 +850,289 @@ class TestCDSBuildRequest:
 
         assert request["year"] == ["2023", "2024"]
         assert request["month"] == [f"{m:02d}" for m in range(1, 13)]
+
+
+# ---------------------------------------------------------------------------
+# Story 4.3: NetCDF Parsing Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sample_netcdf_bytes() -> bytes:
+    """Create sample NetCDF bytes for testing using xarray.
+
+    Generates a minimal NetCDF file with temperature (t2m) and
+    precipitation (tp) variables over a small grid and time range.
+    """
+    import xarray as xr
+
+    # Create time coordinates (4 timestamps over 2 days)
+    times = pd.date_range("2024-01-15", periods=4, freq="6h")
+
+    # Create spatial coordinates (small 2x2 grid)
+    lats = np.array([51.0, 51.5])
+    lons = np.array([22.0, 22.5])
+
+    # Create temperature data (Kelvin - will be converted to Celsius)
+    # Values around 280K = ~7C
+    t2m_data = np.array(
+        [
+            [[278.0, 279.0], [280.0, 281.0]],  # time 0
+            [[279.0, 280.0], [281.0, 282.0]],  # time 1
+            [[280.0, 281.0], [282.0, 283.0]],  # time 2
+            [[279.5, 280.5], [281.5, 282.5]],  # time 3
+        ]
+    )
+
+    # Create precipitation data (meters - small values)
+    tp_data = np.array(
+        [
+            [[0.001, 0.002], [0.001, 0.002]],  # time 0
+            [[0.0, 0.0], [0.0, 0.0]],  # time 1
+            [[0.003, 0.004], [0.003, 0.004]],  # time 2
+            [[0.001, 0.001], [0.001, 0.001]],  # time 3
+        ]
+    )
+
+    ds = xr.Dataset(
+        {
+            "t2m": (["time", "latitude", "longitude"], t2m_data),
+            "tp": (["time", "latitude", "longitude"], tp_data),
+        },
+        coords={
+            "time": times,
+            "latitude": lats,
+            "longitude": lons,
+        },
+    )
+
+    # Add attributes for realism
+    ds["t2m"].attrs = {"units": "K", "long_name": "2 metre temperature"}
+    ds["tp"].attrs = {"units": "m", "long_name": "Total precipitation"}
+
+    # Write to bytes
+    import io
+
+    buffer = io.BytesIO()
+    ds.to_netcdf(buffer, engine="h5netcdf")
+    buffer.seek(0)
+    return buffer.read()
+
+
+class TestCDSNetCDFParsing:
+    """Tests for NetCDF parsing functionality (Story 4.3)."""
+
+    def test_parse_netcdf_extracts_timestamps(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf extracts timestamps from NetCDF data."""
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        timestamps = result.metadata.get("timestamps", [])
+        assert len(timestamps) == 4
+        # Check timestamps are ISO-8601 format
+        assert "2024-01-15" in timestamps[0]
+        assert timestamps[0].endswith("Z")
+
+    def test_parse_netcdf_extracts_temperature_in_celsius(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf converts temperature from Kelvin to Celsius."""
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        variables = result.metadata.get("variables", [])
+        assert "2m_temperature" in variables
+
+        # Get temperature column index
+        temp_idx = variables.index("2m_temperature")
+
+        # Temperature values should be in Celsius (around 5-10C, not 280K)
+        temp_values = result.data[:, temp_idx]
+        assert np.all(temp_values > -50)  # Not Kelvin
+        assert np.all(temp_values < 50)  # Reasonable Celsius range
+
+        # Verify units in metadata
+        units = result.metadata.get("units", {})
+        assert units.get("2m_temperature") == "celsius"
+
+    def test_parse_netcdf_computes_spatial_mean(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf computes spatial mean over lat/lon dimensions."""
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        # Result should have shape (time, variables) = (4, 2)
+        assert result.data.shape == (4, 2)
+
+        # Values should be the mean of the 2x2 grid at each timestamp
+        # First timestamp t2m: mean of [[278, 279], [280, 281]] = 279.5K = 6.35C
+        variables = result.metadata.get("variables", [])
+        temp_idx = variables.index("2m_temperature")
+        first_temp = result.data[0, temp_idx]
+
+        # Expected: 279.5K - 273.15 = 6.35C
+        expected_temp = 279.5 - 273.15
+        assert abs(first_temp - expected_temp) < 0.1
+
+    def test_parse_netcdf_includes_variables_in_metadata(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf includes variable names in metadata."""
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        variables = result.metadata.get("variables", [])
+        assert "2m_temperature" in variables
+        assert "total_precipitation" in variables
+        assert len(variables) == 2
+
+    def test_parse_netcdf_includes_units_in_metadata(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf includes unit information in metadata."""
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        units = result.metadata.get("units", {})
+        assert units.get("2m_temperature") == "celsius"
+        assert units.get("total_precipitation") == "m"
+
+    def test_parse_netcdf_returns_rawdata_type(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf returns a RawData object."""
+        from satellitehub._types import RawData
+
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        assert isinstance(result, RawData)
+        assert isinstance(result.data, np.ndarray)
+        assert isinstance(result.metadata, dict)
+
+    def test_parse_netcdf_data_is_float32(
+        self, provider: CDSProvider, sample_netcdf_bytes: bytes
+    ) -> None:
+        """_parse_netcdf returns data as float32 array."""
+        result = provider._parse_netcdf(sample_netcdf_bytes)
+
+        assert result.data.dtype == np.float32
+
+    def test_extract_era5_data_handles_missing_variables(
+        self, provider: CDSProvider
+    ) -> None:
+        """_extract_era5_data handles datasets with unknown variable names."""
+        import xarray as xr
+
+        # Create dataset with non-standard variable name
+        times = pd.date_range("2024-01-15", periods=2, freq="6h")
+        ds = xr.Dataset(
+            {
+                "unknown_var": (["time"], np.array([1.0, 2.0])),
+            },
+            coords={"time": times},
+        )
+
+        result = provider._extract_era5_data(ds)
+
+        # Should fall back to using the unknown variable
+        assert result.data.shape[0] == 2
+        assert "unknown_var" in result.metadata.get("variables", [])
+
+
+class TestCDSDownloadWithNetCDF:
+    """Integration tests for download with NetCDF parsing."""
+
+    def test_download_returns_parsed_data(
+        self,
+        provider: CDSProvider,
+        credentials: ProviderCredentials,
+        sample_netcdf_bytes: bytes,
+    ) -> None:
+        """Full download flow returns parsed NetCDF data."""
+        # Setup authenticated provider
+        provider._session.get = MagicMock(return_value=_mock_auth_success_response())
+        provider.authenticate(credentials)
+
+        entry = CatalogEntry(
+            provider="cds",
+            product_id="test",
+            bands_available=["2m_temperature", "total_precipitation"],
+            metadata={
+                "product": _ERA5_PRODUCT,
+                "start_date": "2024-01-15",
+                "end_date": "2024-01-16",
+                "lat": "51.25",
+                "lon": "22.57",
+            },
+        )
+
+        # Mock responses
+        download_resp = MagicMock(spec=requests.Response)
+        download_resp.status_code = 200
+        download_resp.content = sample_netcdf_bytes
+
+        with patch.object(provider, "_retry_request") as mock_retry:
+            mock_retry.side_effect = [
+                _mock_submit_success_response(),
+                download_resp,
+            ]
+            provider._session.get = MagicMock(
+                return_value=_mock_queue_completed_response()
+            )
+
+            result = provider.download(entry)
+
+        # Verify parsed data structure
+        assert result is not None
+        assert result.metadata["provider"] == "cds"
+        assert "timestamps" in result.metadata
+        assert "variables" in result.metadata
+        assert result.data.shape[1] == 2  # 2 variables
+
+    def test_download_merges_provider_metadata(
+        self,
+        provider: CDSProvider,
+        credentials: ProviderCredentials,
+        sample_netcdf_bytes: bytes,
+    ) -> None:
+        """Download merges parsed metadata with provider context."""
+        # Setup authenticated provider
+        provider._session.get = MagicMock(return_value=_mock_auth_success_response())
+        provider.authenticate(credentials)
+
+        entry = CatalogEntry(
+            provider="cds",
+            product_id="test",
+            bands_available=["2m_temperature"],
+            metadata={
+                "product": _ERA5_PRODUCT,
+                "start_date": "2024-01-15",
+                "end_date": "2024-01-16",
+                "lat": "51.25",
+                "lon": "22.57",
+            },
+        )
+
+        download_resp = MagicMock(spec=requests.Response)
+        download_resp.status_code = 200
+        download_resp.content = sample_netcdf_bytes
+
+        with patch.object(provider, "_retry_request") as mock_retry:
+            mock_retry.side_effect = [
+                _mock_submit_success_response(),
+                download_resp,
+            ]
+            provider._session.get = MagicMock(
+                return_value=_mock_queue_completed_response()
+            )
+
+            result = provider.download(entry)
+
+        # Check merged metadata
+        assert result.metadata["provider"] == "cds"
+        assert result.metadata["product"] == _ERA5_PRODUCT
+        assert result.metadata["time_range"] == ("2024-01-15", "2024-01-16")
+        assert "bounds" in result.metadata
+        assert "crs" in result.metadata
+        # Parsed metadata from NetCDF
+        assert "timestamps" in result.metadata
+        assert "variables" in result.metadata
+        assert "units" in result.metadata

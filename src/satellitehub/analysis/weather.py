@@ -42,7 +42,8 @@ def aggregate_era5_daily(raw_data: RawData) -> pd.DataFrame:
 
     Args:
         raw_data: RawData from CDSProvider.download() with data array
-            containing temperature and precipitation variables.
+            of shape (time, variables) containing temperature and precipitation.
+            Metadata should include 'timestamps' and 'variables' lists.
 
     Returns:
         DataFrame with columns: timestamp (date string), temperature_min,
@@ -73,48 +74,93 @@ def aggregate_era5_daily(raw_data: RawData) -> pd.DataFrame:
         logger.warning("No ERA5 data to aggregate")
         return pd.DataFrame(columns=empty_columns)
 
-    # Extract timestamps from metadata
+    # Extract timestamps and variables from metadata
     timestamps: list[str] = metadata.get("timestamps", [])
+    variables: list[str] = metadata.get("variables", [])
+
     if not timestamps:
         logger.warning("No timestamps in ERA5 metadata")
         return pd.DataFrame(columns=empty_columns)
 
-    # MVP: ERA5 data structure is simplified (NetCDF parsing placeholder)
-    # For now, create synthetic daily data from available observations
-    # Real implementation would parse xarray/NetCDF with proper variables
+    # Find variable indices
+    temp_idx: int | None = None
+    precip_idx: int | None = None
 
-    # Parse dates from timestamps
-    dates: list[str] = []
+    for idx, var_name in enumerate(variables):
+        if var_name in ("2m_temperature", "t2m", "2t"):
+            temp_idx = idx
+        elif var_name in ("total_precipitation", "tp"):
+            precip_idx = idx
+
+    # Parse timestamps into datetime objects and extract dates
+    parsed_times: list[tuple[str, datetime]] = []
     for ts in timestamps:
         try:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
             date_str = dt.strftime("%Y-%m-%d")
-            if date_str not in dates:
-                dates.append(date_str)
+            parsed_times.append((date_str, dt))
         except (ValueError, AttributeError):
             continue
 
-    if not dates:
+    if not parsed_times:
         return pd.DataFrame(columns=empty_columns)
 
-    # Extract temperature from data array
-    # MVP: Use spatial mean as temperature proxy
-    valid_mask = np.isfinite(data_array)
-    if not np.any(valid_mask):
-        return pd.DataFrame(columns=empty_columns)
+    # Group data by date
+    # Data shape: (time, variables)
+    date_groups: dict[str, list[int]] = {}
+    for idx, (date_str, _) in enumerate(parsed_times):
+        if date_str not in date_groups:
+            date_groups[date_str] = []
+        date_groups[date_str].append(idx)
 
-    temp_value = float(np.nanmean(data_array))
-
-    # Create daily records - one per unique date
+    # Create daily records
     daily_records: list[dict[str, Any]] = []
-    for date in dates:
+
+    for date_str in sorted(date_groups.keys()):
+        indices = date_groups[date_str]
+
+        # Extract temperature values for this date
+        if temp_idx is not None and data_array.ndim >= 2:
+            temp_values = data_array[indices, temp_idx]
+            valid_temps = temp_values[np.isfinite(temp_values)]
+            if len(valid_temps) > 0:
+                temp_min = float(np.min(valid_temps))
+                temp_max = float(np.max(valid_temps))
+                temp_mean = float(np.mean(valid_temps))
+            else:
+                temp_min = temp_max = temp_mean = float("nan")
+        elif data_array.ndim == 1:
+            # 1D array fallback (single variable)
+            temp_values = data_array[indices]
+            valid_temps = temp_values[np.isfinite(temp_values)]
+            if len(valid_temps) > 0:
+                temp_min = float(np.min(valid_temps))
+                temp_max = float(np.max(valid_temps))
+                temp_mean = float(np.mean(valid_temps))
+            else:
+                temp_min = temp_max = temp_mean = float("nan")
+        else:
+            temp_min = temp_max = temp_mean = float("nan")
+
+        # Extract precipitation values for this date (sum for daily total)
+        if precip_idx is not None and data_array.ndim >= 2:
+            precip_values = data_array[indices, precip_idx]
+            valid_precip = precip_values[np.isfinite(precip_values)]
+            if len(valid_precip) > 0:
+                # ERA5 precipitation is in meters; convert to mm
+                precip_total = float(np.sum(valid_precip)) * 1000.0
+            else:
+                precip_total = 0.0
+        else:
+            precip_total = 0.0
+
         daily_records.append(
             {
-                "timestamp": date,
-                "temperature_min": temp_value,
-                "temperature_max": temp_value,
-                "temperature_mean": temp_value,
-                "precipitation": 0.0,  # MVP: No separate precip variable yet
+                "timestamp": date_str,
+                "temperature_min": temp_min,
+                "temperature_max": temp_max,
+                "temperature_mean": temp_mean,
+                "precipitation": precip_total,
                 "source": "era5",
             }
         )

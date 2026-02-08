@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 import random
+import tempfile
 import time
 from datetime import datetime
+from io import BytesIO
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 import requests
+import xarray as xr
 
 from satellitehub._types import RawData
 from satellitehub.config import Config
@@ -280,23 +283,26 @@ class CDSProvider(DataProvider):
 
         # Download result
         logger.debug("ERA5 request completed, downloading result...")
-        data = self._download_result(download_url)
+        raw_data = self._download_result(download_url)
+
+        # Merge parsed metadata with provider context
+        merged_metadata = {
+            "provider": "cds",
+            "product": product,
+            "time_range": (start_date, end_date),
+            "bounds": {
+                "north": lat + 0.25,
+                "south": lat - 0.25,
+                "east": lon + 0.25,
+                "west": lon - 0.25,
+            },
+            "crs": "EPSG:4326",
+            **raw_data.metadata,  # timestamps, variables, units from NetCDF
+        }
 
         return RawData(
-            data=data,
-            metadata={
-                "provider": "cds",
-                "product": product,
-                "variables": variables,
-                "time_range": (start_date, end_date),
-                "bounds": {
-                    "north": lat + 0.25,
-                    "south": lat - 0.25,
-                    "east": lon + 0.25,
-                    "west": lon - 0.25,
-                },
-                "crs": "EPSG:4326",
-            },
+            data=raw_data.data,
+            metadata=merged_metadata,
         )
 
     def _build_request(
@@ -479,19 +485,17 @@ class CDSProvider(DataProvider):
 
             time.sleep(_POLL_INTERVAL)
 
-    def _download_result(self, download_url: str) -> npt.NDArray[np.floating[Any]]:
-        """Download result file from CDS.
+    def _download_result(self, download_url: str) -> RawData:
+        """Download and parse NetCDF result file from CDS.
 
         Args:
             download_url: URL to download result.
 
         Returns:
-            Data as numpy array. Note: MVP implementation returns raw
-            bytes as float32 array. Full NetCDF/GRIB parsing requires
-            xarray or netCDF4 integration (planned for Story 4.3).
+            RawData with parsed ERA5 variables, timestamps, and metadata.
 
         Raises:
-            ProviderError: If download fails.
+            ProviderError: If download or parsing fails.
         """
         resp = self._retry_request(
             "get",
@@ -504,13 +508,146 @@ class CDSProvider(DataProvider):
         content = resp.content
         logger.debug("Downloaded %d bytes from CDS", len(content))
 
-        # MVP: Return raw bytes as placeholder array
-        # TODO(Story 4.3): Parse NetCDF/GRIB using xarray or netCDF4
-        logger.warning(
-            "MVP: Returning raw bytes as float32 array. "
-            "NetCDF parsing will be implemented in Story 4.3."
+        # Parse NetCDF and extract ERA5 data
+        return self._parse_netcdf(content)
+
+    def _parse_netcdf(self, content: bytes) -> RawData:
+        """Parse NetCDF bytes into RawData.
+
+        Uses h5netcdf engine for in-memory parsing via BytesIO.
+        Falls back to temp file for NetCDF formats requiring seekable streams.
+
+        Args:
+            content: Raw bytes of NetCDF file.
+
+        Returns:
+            RawData with extracted variables and metadata.
+
+        Raises:
+            ProviderError: If parsing fails.
+        """
+        # Try in-memory parsing first (h5netcdf supports BytesIO for HDF5/NetCDF4)
+        try:
+            with xr.open_dataset(BytesIO(content), engine="h5netcdf") as ds:
+                return self._extract_era5_data(ds)
+        except Exception as mem_err:
+            logger.debug(
+                "In-memory NetCDF parsing failed: %s. Trying temp file fallback.",
+                mem_err,
+            )
+
+        # Fallback: write to temp file for formats needing seekable stream
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".nc", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+
+            with xr.open_dataset(tmp_path) as ds:
+                return self._extract_era5_data(ds)
+        except Exception as file_err:
+            raise ProviderError(
+                what="Failed to parse ERA5 NetCDF data",
+                cause=str(file_err),
+                fix="Check CDS response format or try again",
+            ) from file_err
+
+    def _extract_era5_data(self, ds: xr.Dataset) -> RawData:
+        """Extract ERA5 variables from xarray Dataset.
+
+        Computes spatial mean over lat/lon dimensions, converts temperature
+        from Kelvin to Celsius, and formats timestamps as ISO-8601.
+
+        Args:
+            ds: Opened xarray Dataset.
+
+        Returns:
+            RawData with shape (time, variables) and metadata.
+        """
+        # ERA5 variable name mappings (CDS API names -> standard names)
+        var_mappings: dict[str, str] = {
+            "t2m": "2m_temperature",
+            "tp": "total_precipitation",
+            "2t": "2m_temperature",  # Alternative name
+        }
+
+        # Find available variables
+        available_vars: list[str] = []
+        var_names: list[str] = []
+        for cds_name, standard_name in var_mappings.items():
+            if cds_name in ds.data_vars:
+                available_vars.append(cds_name)
+                var_names.append(standard_name)
+
+        if not available_vars:
+            # Fallback: use first available data variable
+            first_var = list(ds.data_vars.keys())[0] if ds.data_vars else None
+            if first_var:
+                available_vars = [str(first_var)]
+                var_names = [str(first_var)]
+
+        # Extract time dimension
+        time_dim = "time" if "time" in ds.dims else "valid_time"
+        if time_dim not in ds.dims:
+            # Single timestamp case
+            timestamps = [datetime.now().isoformat() + "Z"]
+            n_times = 1
+        else:
+            time_values = ds[time_dim].values
+            timestamps = [
+                np.datetime_as_string(t, unit="s").replace("T", "T") + "Z"
+                if isinstance(t, np.datetime64)
+                else str(t)
+                for t in time_values
+            ]
+            n_times = len(timestamps)
+
+        # Extract and process each variable
+        data_arrays: list[npt.NDArray[np.floating[Any]]] = []
+        units: dict[str, str] = {}
+
+        for cds_name, standard_name in zip(available_vars, var_names, strict=True):
+            var_data = ds[cds_name]
+
+            # Compute spatial mean over lat/lon
+            spatial_dims = [d for d in var_data.dims if d in ("latitude", "longitude")]
+            var_mean = var_data.mean(dim=spatial_dims) if spatial_dims else var_data
+
+            # Convert to numpy array, ensuring 1D for time series
+            values = var_mean.values.flatten()
+
+            # Temperature conversion: Kelvin -> Celsius
+            if standard_name == "2m_temperature":
+                values = values - 273.15
+                units[standard_name] = "celsius"
+            elif standard_name == "total_precipitation":
+                # Precipitation is in meters; keep as-is for now
+                units[standard_name] = "m"
+            else:
+                units[standard_name] = str(var_data.attrs.get("units", "unknown"))
+
+            data_arrays.append(values.astype(np.float32))
+
+        # Stack into (time, variables) shape
+        if data_arrays:
+            data = np.column_stack(data_arrays)
+        else:
+            data = np.empty((n_times, 0), dtype=np.float32)
+
+        logger.debug(
+            "Extracted ERA5 data: shape=%s, variables=%s, timestamps=%d",
+            data.shape,
+            var_names,
+            len(timestamps),
         )
-        return np.frombuffer(content, dtype=np.uint8).astype(np.float32)
+
+        return RawData(
+            data=data,
+            metadata={
+                "timestamps": timestamps,
+                "variables": var_names,
+                "units": units,
+            },
+        )
 
     def _retry_request(
         self,
