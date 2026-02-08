@@ -27,6 +27,7 @@ from satellitehub.results import (
     BaseResult,
     ChangeResult,
     ResultMetadata,
+    ThermalResult,
     VegetationResult,
     WeatherResult,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "BaseResult",
     "ChangeResult",
     "ResultMetadata",
+    "ThermalResult",
     "VegetationResult",
     "WeatherResult",
     # Exceptions

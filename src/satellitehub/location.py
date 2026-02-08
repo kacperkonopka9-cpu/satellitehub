@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -1141,6 +1142,7 @@ class Location:
             45.2
         """
         from satellitehub._pipeline import _acquire_weather
+        from satellitehub._types import RawData
         from satellitehub.analysis.weather import build_weather_result
 
         # Calculate time range
@@ -1149,37 +1151,57 @@ class Location:
         start_date = (now - timedelta(days=last_days)).strftime("%Y-%m-%d")
         time_range = (start_date, end_date)
 
-        # Step 1: Acquire ERA5 data (global coverage)
-        era5_raw = None
-        try:
-            era5_raw = _acquire_weather(
-                location=self,
-                provider_name="cds",
-                variables=None,  # Default variables
-                last_days=last_days,
-            )
-            if era5_raw.data.size == 0:
-                era5_raw = None
-        except (ProviderError, ConfigurationError) as exc:
-            logger.warning("ERA5 data acquisition failed: %s", exc)
-
-        # Step 2: Acquire IMGW data (Polish stations only)
-        imgw_raw = None
-        # Only try IMGW for locations roughly in Poland (lat: 49-55, lon: 14-24)
-        if 49.0 <= self._lat <= 55.0 and 14.0 <= self._lon <= 24.0:
+        # Define acquisition functions for parallel execution
+        def acquire_era5() -> RawData | None:
+            """Acquire ERA5 data (global coverage)."""
             try:
-                imgw_raw = _acquire_weather(
+                raw = _acquire_weather(
+                    location=self,
+                    provider_name="cds",
+                    variables=None,  # Default variables
+                    last_days=last_days,
+                )
+                if raw.data.size == 0:
+                    return None
+                return raw
+            except (ProviderError, ConfigurationError) as exc:
+                logger.warning("ERA5 data acquisition failed: %s", exc)
+                return None
+
+        def acquire_imgw() -> RawData | None:
+            """Acquire IMGW data (Polish stations only)."""
+            # Only try IMGW for locations roughly in Poland
+            if not (49.0 <= self._lat <= 55.0 and 14.0 <= self._lon <= 24.0):
+                return None
+            try:
+                raw = _acquire_weather(
                     location=self,
                     provider_name="imgw",
                     station_type="synop",
                     last_days=last_days,
                 )
-                if imgw_raw.data.size == 0:
-                    imgw_raw = None
+                if raw.data.size == 0:
+                    return None
+                return raw
             except (ProviderError, ConfigurationError) as exc:
                 logger.warning("IMGW data acquisition failed: %s", exc)
+                return None
 
-        # Step 3: Build WeatherResult from raw data
+        # Acquire data from both providers in parallel
+        era5_raw: RawData | None = None
+        imgw_raw: RawData | None = None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            era5_future = executor.submit(acquire_era5)
+            imgw_future = executor.submit(acquire_imgw)
+
+            for future in as_completed([era5_future, imgw_future]):
+                if future is era5_future:
+                    era5_raw = era5_future.result()
+                else:
+                    imgw_raw = imgw_future.result()
+
+        # Build WeatherResult from raw data
         result = build_weather_result(
             era5_data=era5_raw,
             imgw_data=imgw_raw,

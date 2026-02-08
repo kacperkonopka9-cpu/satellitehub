@@ -257,11 +257,28 @@ class CDSEProvider(DataProvider):
             Populated ``CatalogEntry``.
         """
         content_date = item.get("ContentDate", {})
+
+        # Extract cloud cover from Attributes array
+        # CDSE OData includes cloudCover in the Attributes array
+        cloud_cover = 0.0
+        attributes = item.get("Attributes", [])
+        for attr in attributes:
+            if isinstance(attr, dict):
+                attr_name = attr.get("Name", "")
+                if attr_name == "cloudCover":
+                    try:
+                        # Cloud cover is returned as percentage (0-100)
+                        # Normalize to 0-1 range
+                        cloud_cover = float(attr.get("Value", 0)) / 100.0
+                    except (ValueError, TypeError):
+                        cloud_cover = 0.0
+                    break
+
         return CatalogEntry(
             provider="cdse",
             product_id=str(item.get("Id", "")),
             timestamp=str(content_date.get("Start", "")),
-            cloud_cover=0.0,
+            cloud_cover=cloud_cover,
             geometry=item.get("GeoFootprint", {}),
             bands_available=list(_S2_L2A_BANDS),
             metadata={

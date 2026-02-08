@@ -33,6 +33,13 @@ _PRECIP_DRY_THRESHOLD: float = 1.0  # Below: "dry"
 _PRECIP_LIGHT_THRESHOLD: float = 10.0  # 1-10: "light rainfall"
 _PRECIP_MODERATE_THRESHOLD: float = 30.0  # 10-30: "moderate", above: "heavy"
 
+# ── Land Surface Temperature interpretation thresholds (°C) ─────────
+# LST differs from air temperature: surfaces can be much hotter
+_LST_COLD_THRESHOLD: float = 10.0  # Below: "cold surface"
+_LST_COOL_THRESHOLD: float = 20.0  # 10-20: "cool surface"
+_LST_WARM_THRESHOLD: float = 35.0  # 20-35: "warm surface"
+_LST_HOT_THRESHOLD: float = 45.0  # 35-45: "hot surface", above: "extreme"
+
 
 def _interpret_ndvi(value: float) -> str:
     """Return plain-language interpretation of an NDVI value.
@@ -104,6 +111,38 @@ def _interpret_precipitation(total_precip: float) -> str:
     if total_precip < _PRECIP_MODERATE_THRESHOLD:
         return "moderate rainfall"
     return "heavy rainfall"
+
+
+def _interpret_surface_temperature(mean_temp: float) -> str:
+    """Return plain-language interpretation of land surface temperature.
+
+    Land surface temperature (LST) differs from air temperature - surfaces
+    like asphalt, bare soil, or rooftops can be significantly hotter than
+    the surrounding air, especially in summer.
+
+    Args:
+        mean_temp: Mean land surface temperature in degrees Celsius.
+
+    Returns:
+        Human-readable interpretation string.
+
+    Example:
+        >>> _interpret_surface_temperature(25.5)
+        'warm surface'
+        >>> _interpret_surface_temperature(48.0)
+        'extreme heat'
+    """
+    if math.isnan(mean_temp):
+        return "no data"
+    if mean_temp < _LST_COLD_THRESHOLD:
+        return "cold surface"
+    if mean_temp < _LST_COOL_THRESHOLD:
+        return "cool surface"
+    if mean_temp < _LST_WARM_THRESHOLD:
+        return "warm surface"
+    if mean_temp < _LST_HOT_THRESHOLD:
+        return "hot surface"
+    return "extreme heat"
 
 
 def _interpret_change(delta: float) -> str:
@@ -1151,6 +1190,228 @@ class WeatherResult(BaseResult):
                     fontsize=14,
                     transform=ax1.transAxes,
                 )
+
+        plt.tight_layout()
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+        return path
+
+
+@dataclass
+class ThermalResult(BaseResult):
+    """Land surface temperature analysis result from thermal satellite bands.
+
+    Extends ``BaseResult`` with thermal-specific fields for Landsat thermal
+    band analysis (B10, B11, ST_B10). The ``__repr__`` renders a narrative
+    summary showing temperature statistics with land surface interpretation.
+
+    Land surface temperature (LST) differs from air temperature: surfaces like
+    asphalt, bare soil, or rooftops can be significantly hotter than the
+    surrounding air, especially in summer.
+
+    Attributes:
+        mean_temperature: Spatial mean land surface temperature in °C.
+        temperature_min: Minimum observed temperature in °C.
+        temperature_max: Maximum observed temperature in °C.
+        temperature_std: Standard deviation of temperature values in °C.
+        thermal_unit: Temperature unit, always "celsius" after conversion.
+        thermal_band: Band identifier used (e.g., "B10", "ST_B10").
+
+    Example:
+        >>> import numpy as np
+        >>> result = ThermalResult(
+        ...     data=np.array([[25.5, 26.0], [24.8, 25.2]], dtype=np.float32),
+        ...     confidence=0.85,
+        ...     mean_temperature=25.4,
+        ...     temperature_min=24.8,
+        ...     temperature_max=26.0,
+        ...     temperature_std=0.4,
+        ...     thermal_unit="celsius",
+        ...     thermal_band="ST_B10",
+        ... )
+        >>> result.mean_temperature
+        25.4
+    """
+
+    mean_temperature: float = float("nan")
+    temperature_min: float = float("nan")
+    temperature_max: float = float("nan")
+    temperature_std: float = float("nan")
+    thermal_unit: str = "celsius"
+    thermal_band: str = ""
+
+    def __repr__(self) -> str:
+        """Return narrative summary for interactive display.
+
+        Shows location, acquisition time, confidence, temperature statistics
+        with land surface interpretation, and thermal band used. Does NOT
+        show raw arrays or full metadata dictionaries.
+        """
+        lines: list[str] = [f"{type(self).__name__}("]
+
+        # Location from bounds (requires all 4 keys to be valid)
+        bounds = self.metadata.bounds
+        required_keys = {"minx", "miny", "maxx", "maxy"}
+        if bounds and required_keys.issubset(bounds.keys()):
+            lat = (bounds["miny"] + bounds["maxy"]) / 2
+            lon = (bounds["minx"] + bounds["maxx"]) / 2
+            ns = "N" if lat >= 0 else "S"
+            ew = "E" if lon >= 0 else "W"
+            lines.append(
+                f"  location: {abs(lat):.2f}\u00b0{ns}, {abs(lon):.2f}\u00b0{ew}"
+            )
+
+        # Acquisition time from timestamps
+        ts = self.metadata.timestamps
+        if ts:
+            lines.append(f"  acquisition: {ts[0][:10]}")
+
+        # Confidence
+        lines.append(f"  confidence: {self.confidence:.2f}")
+
+        # Mean temperature with interpretation
+        if math.isnan(self.mean_temperature):
+            lines.append("  mean_temperature: N/A (no valid data)")
+        else:
+            interp = _interpret_surface_temperature(self.mean_temperature)
+            temp_str = f"{self.mean_temperature:.1f}\u00b0C ({interp})"
+            lines.append(f"  mean_temperature: {temp_str}")
+
+        # Temperature range
+        has_min = not math.isnan(self.temperature_min)
+        has_max = not math.isnan(self.temperature_max)
+        if has_min and has_max:
+            lines.append(
+                f"  temperature_range: {self.temperature_min:.1f}\u00b0C to "
+                f"{self.temperature_max:.1f}\u00b0C"
+            )
+
+        # Standard deviation
+        if not math.isnan(self.temperature_std):
+            lines.append(f"  temperature_std: \u00b1{self.temperature_std:.1f}\u00b0C")
+
+        # Thermal band
+        if self.thermal_band:
+            lines.append(f"  thermal_band: {self.thermal_band}")
+
+        # Warnings
+        for w in self.warnings:
+            lines.append(f"  \u26a0 {w}")
+
+        lines.append(")")
+        return "\n".join(lines)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Export thermal result to pandas DataFrame.
+
+        Returns a DataFrame with thermal-specific columns including temperature
+        statistics, interpretation, and metadata.
+
+        Returns:
+            pandas DataFrame with thermal analysis data.
+        """
+        import pandas as pd
+
+        bounds = self.metadata.bounds
+        lat = lon = None
+        if bounds and {"minx", "miny", "maxx", "maxy"}.issubset(bounds.keys()):
+            lat = (bounds["miny"] + bounds["maxy"]) / 2
+            lon = (bounds["minx"] + bounds["maxx"]) / 2
+
+        row: dict[str, Any] = {
+            "latitude": lat,
+            "longitude": lon,
+            "mean_temperature": self.mean_temperature,
+            "temperature_min": self.temperature_min,
+            "temperature_max": self.temperature_max,
+            "temperature_std": self.temperature_std,
+            "temperature_interpretation": _interpret_surface_temperature(
+                self.mean_temperature
+            ),
+            "thermal_unit": self.thermal_unit,
+            "thermal_band": self.thermal_band,
+            "confidence": self.confidence,
+            "source": self.metadata.source,
+            "crs": self.metadata.crs,
+        }
+
+        if self.metadata.timestamps:
+            row["acquisition_date"] = self.metadata.timestamps[0]
+
+        return pd.DataFrame([row])
+
+    def to_png(self, path: str | Path) -> Path:
+        """Export thermal visualization to PNG image.
+
+        Creates a visualization showing the land surface temperature raster
+        with a heat-appropriate colormap and annotations.
+
+        Args:
+            path: Output file path.
+
+        Returns:
+            Path object pointing to the written file.
+        """
+        import matplotlib
+
+        matplotlib.use("Agg")  # Non-interactive backend for file output
+        import matplotlib.pyplot as plt
+
+        path = Path(path)
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+
+        # Build title
+        title_parts = ["Land Surface Temperature"]
+        bounds = self.metadata.bounds
+        if bounds and {"minx", "miny", "maxx", "maxy"}.issubset(bounds.keys()):
+            lat = (bounds["miny"] + bounds["maxy"]) / 2
+            lon = (bounds["minx"] + bounds["maxx"]) / 2
+            ns = "N" if lat >= 0 else "S"
+            ew = "E" if lon >= 0 else "W"
+            title_parts.append(f"({abs(lat):.2f}\u00b0{ns}, {abs(lon):.2f}\u00b0{ew})")
+
+        ts = self.metadata.timestamps
+        if ts:
+            title_parts.append(f"\n{ts[0][:10]}")
+
+        # Add key metric
+        if not math.isnan(self.mean_temperature):
+            interp = _interpret_surface_temperature(self.mean_temperature)
+            title_parts.append(f"\nMean: {self.mean_temperature:.1f}\u00b0C ({interp})")
+        else:
+            title_parts.append("\nMean: N/A")
+
+        ax.set_title(" ".join(title_parts[:2]) + "".join(title_parts[2:]))
+
+        # Plot thermal data
+        if self.data.size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No thermal data available",
+                ha="center",
+                va="center",
+                fontsize=14,
+                transform=ax.transAxes,
+            )
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+        elif self.data.ndim >= 2:
+            plot_data = self.data
+            if plot_data.ndim == 3:
+                plot_data = plot_data[0]
+            # Use 'hot' colormap for thermal data, auto-scale to data range
+            has_min = not math.isnan(self.temperature_min)
+            has_max = not math.isnan(self.temperature_max)
+            vmin = self.temperature_min if has_min else None
+            vmax = self.temperature_max if has_max else None
+            im = ax.imshow(plot_data, cmap="hot", vmin=vmin, vmax=vmax)
+            plt.colorbar(im, ax=ax, label="Temperature (\u00b0C)")
+        else:
+            ax.plot(self.data)
+            ax.set_ylabel("Temperature (\u00b0C)")
 
         plt.tight_layout()
         plt.savefig(path, dpi=150, bbox_inches="tight")

@@ -1336,3 +1336,106 @@ class TestCDSEDownload:
 
         assert result.data.shape == (1, 100, 100)
         assert any("B08" in msg and "not found" in msg for msg in caplog.messages)
+
+
+# ---------------------------------------------------------------------------
+# Parse Catalog Entry Tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseCatalogEntry:
+    """Test _parse_catalog_entry static method."""
+
+    def test_extracts_cloud_cover_from_attributes(self) -> None:
+        """Extracts cloud cover from Attributes array."""
+        item = {
+            "Id": "test-uuid",
+            "ContentDate": {"Start": "2024-01-15T10:30:00Z"},
+            "GeoFootprint": {},
+            "Attributes": [
+                {"Name": "cloudCover", "Value": 25.5},
+                {"Name": "otherAttr", "Value": "test"},
+            ],
+        }
+
+        entry = CDSEProvider._parse_catalog_entry(item)
+
+        # 25.5% -> 0.255 normalized
+        assert entry.cloud_cover == pytest.approx(0.255)
+
+    def test_normalizes_cloud_cover_to_0_1_range(self) -> None:
+        """Cloud cover is normalized from 0-100 to 0-1."""
+        item = {
+            "Id": "test-uuid",
+            "ContentDate": {"Start": "2024-01-15T10:30:00Z"},
+            "Attributes": [
+                {"Name": "cloudCover", "Value": 100.0},
+            ],
+        }
+
+        entry = CDSEProvider._parse_catalog_entry(item)
+
+        assert entry.cloud_cover == pytest.approx(1.0)
+
+    def test_defaults_to_zero_when_no_cloud_cover(self) -> None:
+        """Defaults to 0.0 when cloudCover not in Attributes."""
+        item = {
+            "Id": "test-uuid",
+            "ContentDate": {"Start": "2024-01-15T10:30:00Z"},
+            "Attributes": [
+                {"Name": "otherAttr", "Value": "test"},
+            ],
+        }
+
+        entry = CDSEProvider._parse_catalog_entry(item)
+
+        assert entry.cloud_cover == 0.0
+
+    def test_defaults_to_zero_when_no_attributes(self) -> None:
+        """Defaults to 0.0 when Attributes array is missing."""
+        item = {
+            "Id": "test-uuid",
+            "ContentDate": {"Start": "2024-01-15T10:30:00Z"},
+        }
+
+        entry = CDSEProvider._parse_catalog_entry(item)
+
+        assert entry.cloud_cover == 0.0
+
+    def test_handles_invalid_cloud_cover_value(self) -> None:
+        """Handles non-numeric cloudCover value gracefully."""
+        item = {
+            "Id": "test-uuid",
+            "ContentDate": {"Start": "2024-01-15T10:30:00Z"},
+            "Attributes": [
+                {"Name": "cloudCover", "Value": "invalid"},
+            ],
+        }
+
+        entry = CDSEProvider._parse_catalog_entry(item)
+
+        assert entry.cloud_cover == 0.0
+
+    def test_extracts_other_fields_correctly(self) -> None:
+        """Extracts product ID, timestamp, and metadata correctly."""
+        item = {
+            "Id": "abc-123-uuid",
+            "Name": "S2A_MSIL2A_20240115T103021_N0510_R108_T33UWP_20240115T140823.SAFE",
+            "ContentDate": {"Start": "2024-01-15T10:30:21Z"},
+            "ContentLength": "987654321",
+            "Online": True,
+            "S3Path": "/eodata/Sentinel-2/...",
+            "GeoFootprint": {"type": "Polygon", "coordinates": []},
+            "Attributes": [
+                {"Name": "cloudCover", "Value": 15.0},
+            ],
+        }
+
+        entry = CDSEProvider._parse_catalog_entry(item)
+
+        assert entry.provider == "cdse"
+        assert entry.product_id == "abc-123-uuid"
+        assert entry.timestamp == "2024-01-15T10:30:21Z"
+        assert entry.cloud_cover == pytest.approx(0.15)
+        assert entry.metadata["name"] == item["Name"]
+        assert entry.geometry == item["GeoFootprint"]

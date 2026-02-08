@@ -10,9 +10,11 @@ from satellitehub.results import (
     BaseResult,
     ChangeResult,
     ResultMetadata,
+    ThermalResult,
     VegetationResult,
     _interpret_change,
     _interpret_ndvi,
+    _interpret_surface_temperature,
 )
 
 
@@ -612,6 +614,248 @@ class TestChangeResultRepr:
     def test_repr_does_not_show_raw_arrays(self) -> None:
         r = repr(self._make_result())
         assert "array(" not in r.lower()
+
+    def test_repr_performance_under_200ms(self) -> None:
+        result = self._make_result()
+        start = time.perf_counter()
+        for _ in range(100):
+            repr(result)
+        elapsed = (time.perf_counter() - start) / 100
+        assert elapsed < 0.200
+
+    def test_repr_reproducibility(self) -> None:
+        r1 = repr(self._make_result())
+        r2 = repr(self._make_result())
+        assert r1 == r2
+
+
+# ── _interpret_surface_temperature tests ────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestInterpretSurfaceTemperature:
+    """Tests for the _interpret_surface_temperature() helper function."""
+
+    def test_cold_surface(self) -> None:
+        assert _interpret_surface_temperature(5.0) == "cold surface"
+
+    def test_cool_surface(self) -> None:
+        assert _interpret_surface_temperature(15.0) == "cool surface"
+
+    def test_warm_surface(self) -> None:
+        assert _interpret_surface_temperature(28.0) == "warm surface"
+
+    def test_hot_surface(self) -> None:
+        assert _interpret_surface_temperature(40.0) == "hot surface"
+
+    def test_extreme_heat(self) -> None:
+        assert _interpret_surface_temperature(50.0) == "extreme heat"
+
+    def test_boundary_cold_cool(self) -> None:
+        assert _interpret_surface_temperature(9.9) == "cold surface"
+        assert _interpret_surface_temperature(10.0) == "cool surface"
+
+    def test_boundary_cool_warm(self) -> None:
+        assert _interpret_surface_temperature(19.9) == "cool surface"
+        assert _interpret_surface_temperature(20.0) == "warm surface"
+
+    def test_boundary_warm_hot(self) -> None:
+        assert _interpret_surface_temperature(34.9) == "warm surface"
+        assert _interpret_surface_temperature(35.0) == "hot surface"
+
+    def test_boundary_hot_extreme(self) -> None:
+        assert _interpret_surface_temperature(44.9) == "hot surface"
+        assert _interpret_surface_temperature(45.0) == "extreme heat"
+
+    def test_nan_returns_no_data(self) -> None:
+        assert _interpret_surface_temperature(float("nan")) == "no data"
+
+    def test_negative_temperature(self) -> None:
+        assert _interpret_surface_temperature(-10.0) == "cold surface"
+
+
+# ── ThermalResult tests ───────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestThermalResult:
+    """Tests for ThermalResult dataclass construction."""
+
+    def test_construction_with_all_fields(self) -> None:
+        meta = ResultMetadata(
+            source="landsat",
+            timestamps=["2024-06-15T10:30:00Z"],
+            observation_count=1,
+            crs="EPSG:32634",
+            bounds={"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0},
+        )
+        result = ThermalResult(
+            data=np.ones((100, 100), dtype=np.float32) * 28.5,
+            confidence=0.85,
+            metadata=meta,
+            warnings=[],
+            mean_temperature=28.5,
+            temperature_min=24.0,
+            temperature_max=35.2,
+            temperature_std=2.3,
+            thermal_unit="celsius",
+            thermal_band="ST_B10",
+        )
+        assert result.confidence == 0.85
+        assert result.mean_temperature == 28.5
+        assert result.temperature_min == 24.0
+        assert result.temperature_max == 35.2
+        assert result.temperature_std == 2.3
+        assert result.thermal_unit == "celsius"
+        assert result.thermal_band == "ST_B10"
+
+    def test_defaults(self) -> None:
+        result = ThermalResult(data=np.array([], dtype=np.float32))
+        assert result.confidence == 0.0
+        assert math.isnan(result.mean_temperature)
+        assert math.isnan(result.temperature_min)
+        assert math.isnan(result.temperature_max)
+        assert math.isnan(result.temperature_std)
+        assert result.thermal_unit == "celsius"
+        assert result.thermal_band == ""
+        assert result.warnings == []
+        assert isinstance(result.metadata, ResultMetadata)
+
+    def test_inherits_base_result(self) -> None:
+        result = ThermalResult(data=np.array([], dtype=np.float32))
+        assert isinstance(result, BaseResult)
+
+
+@pytest.mark.unit
+class TestThermalResultRepr:
+    """Tests for ThermalResult.__repr__ narrative display."""
+
+    def _make_result(
+        self,
+        *,
+        mean_temperature: float = 28.5,
+        temperature_min: float = 24.0,
+        temperature_max: float = 35.2,
+        temperature_std: float = 2.3,
+        confidence: float = 0.85,
+        thermal_band: str = "ST_B10",
+        warnings: list[str] | None = None,
+        bounds: dict[str, float] | None = None,
+        timestamps: list[str] | None = None,
+    ) -> ThermalResult:
+        if bounds is None:
+            bounds = {"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0}
+        if timestamps is None:
+            timestamps = ["2024-06-15T10:30:00Z"]
+        if warnings is None:
+            warnings = []
+        meta = ResultMetadata(
+            source="landsat",
+            timestamps=timestamps,
+            observation_count=1,
+            crs="EPSG:32634",
+            bounds=bounds,
+        )
+        return ThermalResult(
+            data=np.ones((100, 100), dtype=np.float32) * mean_temperature,
+            confidence=confidence,
+            metadata=meta,
+            warnings=warnings,
+            mean_temperature=mean_temperature,
+            temperature_min=temperature_min,
+            temperature_max=temperature_max,
+            temperature_std=temperature_std,
+            thermal_unit="celsius",
+            thermal_band=thermal_band,
+        )
+
+    def test_repr_contains_class_name(self) -> None:
+        r = repr(self._make_result())
+        assert r.startswith("ThermalResult(")
+
+    def test_repr_contains_location(self) -> None:
+        r = repr(self._make_result())
+        assert "location:" in r
+        assert "51.50" in r  # center lat
+        assert "22.50" in r  # center lon
+        assert "N" in r
+        assert "E" in r
+
+    def test_repr_contains_acquisition(self) -> None:
+        r = repr(self._make_result())
+        assert "acquisition:" in r
+        assert "2024-06-15" in r
+
+    def test_repr_contains_confidence(self) -> None:
+        r = repr(self._make_result())
+        assert "confidence: 0.85" in r
+
+    def test_repr_contains_mean_temperature_with_interpretation(self) -> None:
+        r = repr(self._make_result())
+        assert "mean_temperature:" in r
+        assert "28.5" in r
+        assert "warm surface" in r
+
+    def test_repr_contains_temperature_range(self) -> None:
+        r = repr(self._make_result())
+        assert "temperature_range:" in r
+        assert "24.0" in r
+        assert "35.2" in r
+
+    def test_repr_contains_temperature_std(self) -> None:
+        r = repr(self._make_result())
+        assert "temperature_std:" in r
+        assert "2.3" in r
+
+    def test_repr_contains_thermal_band(self) -> None:
+        r = repr(self._make_result())
+        assert "thermal_band:" in r
+        assert "ST_B10" in r
+
+    def test_repr_with_warnings(self) -> None:
+        r = repr(self._make_result(warnings=["Cloud contamination detected"]))
+        assert "\u26a0" in r  # warning symbol
+        assert "Cloud contamination" in r
+
+    def test_repr_without_warnings_has_no_warning_lines(self) -> None:
+        r = repr(self._make_result(warnings=[]))
+        assert "\u26a0" not in r
+
+    def test_repr_with_nan_temperature(self) -> None:
+        r = repr(
+            self._make_result(
+                mean_temperature=float("nan"),
+                temperature_min=float("nan"),
+                temperature_max=float("nan"),
+                temperature_std=float("nan"),
+                confidence=0.0,
+            )
+        )
+        assert "N/A (no valid data)" in r
+
+    def test_repr_hot_surface_interpretation(self) -> None:
+        r = repr(self._make_result(mean_temperature=42.0))
+        assert "hot surface" in r
+
+    def test_repr_extreme_heat_interpretation(self) -> None:
+        r = repr(self._make_result(mean_temperature=52.0))
+        assert "extreme heat" in r
+
+    def test_repr_cold_surface_interpretation(self) -> None:
+        r = repr(self._make_result(mean_temperature=5.0))
+        assert "cold surface" in r
+
+    def test_repr_does_not_show_raw_arrays(self) -> None:
+        r = repr(self._make_result())
+        assert "array(" not in r.lower()
+
+    def test_repr_without_bounds_omits_location(self) -> None:
+        r = repr(self._make_result(bounds={}))
+        assert "location:" not in r
+
+    def test_repr_without_timestamps_omits_acquisition(self) -> None:
+        r = repr(self._make_result(timestamps=[]))
+        assert "acquisition:" not in r
 
     def test_repr_performance_under_200ms(self) -> None:
         result = self._make_result()
