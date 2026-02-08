@@ -23,8 +23,10 @@ from satellitehub.providers.landsat import (
     _DEFAULT_BANDS,
     _DEFAULT_TIMEOUT,
     _INITIAL_BACKOFF,
+    _KELVIN_TO_CELSIUS,
     _LANDSAT_L2_BANDS,
     _MAX_BACKOFF,
+    _MAX_PARALLEL_DOWNLOADS,
     _MAX_RETRIES,
     _READ_TIMEOUT,
     _RETRYABLE_STATUS_CODES,
@@ -32,8 +34,13 @@ from satellitehub.providers.landsat import (
     _STAC_URL,
     _STATUS_TIMEOUT,
     _SUCCESS_STATUS_CODES,
+    _THERMAL_BANDS,
+    _THERMAL_OFFSET,
+    _THERMAL_SCALE_FACTOR,
     LandsatProvider,
     _compute_bbox,
+    _convert_thermal_to_celsius,
+    _is_thermal_band,
 )
 
 # ---------------------------------------------------------------------------
@@ -496,6 +503,7 @@ class TestLandsatDownload:
                     mock_download.return_value = (
                         np.zeros((4, 100, 100), dtype=np.float32),
                         ["B2", "B3", "B4", "B5"],
+                        {"crs": "EPSG:32633"},
                     )
 
                     provider.download(entry)
@@ -519,6 +527,7 @@ class TestLandsatDownload:
                     mock_download.return_value = (
                         np.zeros((4, 100, 100), dtype=np.float32),
                         ["B2", "B3", "B4", "B5"],
+                        {"crs": "EPSG:32633"},
                     )
 
                     provider.download(entry)
@@ -542,6 +551,7 @@ class TestLandsatDownload:
                     mock_download.return_value = (
                         np.zeros((4, 100, 100), dtype=np.float32),
                         ["B2", "B3", "B4", "B5"],
+                        {"crs": "EPSG:32633"},
                     )
 
                     result = provider.download(entry)
@@ -569,6 +579,7 @@ class TestLandsatDownload:
                     mock_download.return_value = (
                         np.zeros((2, 100, 100), dtype=np.float32),
                         ["B4", "B5"],
+                        {"crs": "EPSG:32633"},
                     )
 
                     provider.download(entry, bands=["B4", "B5"])
@@ -629,6 +640,7 @@ class TestLandsatDownload:
                     mock_download.return_value = (
                         np.array([], dtype=np.float32),
                         [],
+                        {},
                     )
 
                     with pytest.raises(ProviderError) as exc_info:
@@ -920,6 +932,7 @@ class TestLandsatLogging:
                     mock_download.return_value = (
                         np.zeros((4, 100, 100), dtype=np.float32),
                         ["B2", "B3", "B4", "B5"],
+                        {"crs": "EPSG:32633"},
                     )
 
                     with caplog.at_level(logging.INFO):
@@ -927,3 +940,502 @@ class TestLandsatLogging:
 
         assert "Downloading Landsat product" in caplog.text
         assert "Download complete" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Thermal Band Tests
+# ---------------------------------------------------------------------------
+
+
+class TestThermalBandConstants:
+    """Test thermal band constants are defined correctly."""
+
+    def test_thermal_bands_defined(self) -> None:
+        """Thermal bands list is defined with B10, B11, ST_B10."""
+        assert "B10" in _THERMAL_BANDS
+        assert "B11" in _THERMAL_BANDS
+        assert "ST_B10" in _THERMAL_BANDS
+
+    def test_thermal_bands_in_l2_bands(self) -> None:
+        """Thermal bands are included in L2 band list."""
+        assert "B10" in _LANDSAT_L2_BANDS
+        assert "B11" in _LANDSAT_L2_BANDS
+        assert "ST_B10" in _LANDSAT_L2_BANDS
+
+    def test_thermal_scale_factors_defined(self) -> None:
+        """Thermal scale factors are correctly defined."""
+        assert _THERMAL_SCALE_FACTOR == pytest.approx(0.00341802)
+        assert _THERMAL_OFFSET == pytest.approx(149.0)
+        assert _KELVIN_TO_CELSIUS == pytest.approx(273.15)
+
+
+class TestIsThermalBand:
+    """Test _is_thermal_band helper function."""
+
+    def test_b10_is_thermal(self) -> None:
+        """B10 is identified as thermal band."""
+        assert _is_thermal_band("B10") is True
+
+    def test_b11_is_thermal(self) -> None:
+        """B11 is identified as thermal band."""
+        assert _is_thermal_band("B11") is True
+
+    def test_st_b10_is_thermal(self) -> None:
+        """ST_B10 is identified as thermal band."""
+        assert _is_thermal_band("ST_B10") is True
+
+    def test_optical_bands_not_thermal(self) -> None:
+        """Optical bands are not identified as thermal."""
+        assert _is_thermal_band("B2") is False
+        assert _is_thermal_band("B4") is False
+        assert _is_thermal_band("B5") is False
+        assert _is_thermal_band("QA_PIXEL") is False
+
+
+class TestConvertThermalToCelsius:
+    """Test _convert_thermal_to_celsius helper function."""
+
+    def test_converts_known_value(self) -> None:
+        """Converts known DN to expected Celsius temperature."""
+        # DN that should give 20C:
+        # 20 + 273.15 = 293.15 K
+        # (293.15 - 149.0) / 0.00341802 = 42153.87 DN
+        dn = np.array([42154.0], dtype=np.float32)
+        celsius = _convert_thermal_to_celsius(dn)
+
+        assert celsius[0] == pytest.approx(20.0, abs=0.1)
+
+    def test_converts_freezing_point(self) -> None:
+        """Converts DN for 0C (freezing point)."""
+        # 0 + 273.15 = 273.15 K
+        # (273.15 - 149.0) / 0.00341802 = 36302.7 DN
+        dn = np.array([36303.0], dtype=np.float32)
+        celsius = _convert_thermal_to_celsius(dn)
+
+        assert celsius[0] == pytest.approx(0.0, abs=0.1)
+
+    def test_converts_array(self) -> None:
+        """Converts array of values correctly."""
+        # Test with range of temperatures
+        dn = np.array([30000.0, 36303.0, 42154.0], dtype=np.float32)
+        celsius = _convert_thermal_to_celsius(dn)
+
+        assert len(celsius) == 3
+        assert celsius[0] < celsius[1] < celsius[2]  # Increasing order
+
+    def test_preserves_shape(self) -> None:
+        """Preserves input array shape."""
+        dn = np.ones((100, 100), dtype=np.float32) * 36303.0
+        celsius = _convert_thermal_to_celsius(dn)
+
+        assert celsius.shape == (100, 100)
+
+
+class TestThermalBandDownload:
+    """Test thermal band download functionality."""
+
+    def test_download_with_thermal_bands_includes_metadata(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Download with thermal bands includes thermal metadata."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        item = _mock_stac_item_response().json()
+        signed = _mock_sign_response().json()
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_download_bands") as mock_download:
+                    mock_download.return_value = (
+                        np.zeros((2, 100, 100), dtype=np.float32),
+                        ["B10", "ST_B10"],
+                        {"crs": "EPSG:32633"},
+                    )
+
+                    result = provider.download(entry, bands=["B10", "ST_B10"])
+
+        assert result.metadata["thermal_bands"] == ["B10", "ST_B10"]
+        assert result.metadata["thermal_unit"] == "celsius"
+
+    def test_download_without_thermal_bands_no_thermal_metadata(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Download without thermal bands has empty thermal metadata."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        item = _mock_stac_item_response().json()
+        signed = _mock_sign_response().json()
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_download_bands") as mock_download:
+                    mock_download.return_value = (
+                        np.zeros((3, 100, 100), dtype=np.float32),
+                        ["B4", "B5", "B6"],
+                        {"crs": "EPSG:32633"},
+                    )
+
+                    result = provider.download(entry, bands=["B4", "B5", "B6"])
+
+        assert result.metadata["thermal_bands"] == []
+        assert result.metadata["thermal_unit"] is None
+
+    def test_thermal_conversion_logged(
+        self, provider: LandsatProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Thermal band conversion is logged at debug level."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        # Create mock STAC item with B10 thermal asset
+        item = {
+            "id": "LC09_L2SP_182025_20250615_00",
+            "assets": {
+                "lwir11": {"href": "https://example.com/B10.tif"},
+            },
+        }
+        signed = item.copy()
+
+        # Create mock rasterio response
+        mock_memfile = MagicMock()
+        mock_dataset = MagicMock()
+        mock_dataset.read.return_value = np.ones((100, 100), dtype=np.float32) * 36303
+
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_retry_request") as mock_retry:
+                    mock_resp = MagicMock()
+                    mock_resp.content = b"fake_tif_data"
+                    mock_retry.return_value = mock_resp
+
+                    with patch("rasterio.io.MemoryFile") as mock_mf:
+                        mock_mf.return_value.__enter__.return_value = mock_memfile
+                        mock_memfile.open.return_value.__enter__.return_value = (
+                            mock_dataset
+                        )
+
+                        with caplog.at_level(logging.DEBUG):
+                            provider.download(entry, bands=["B10"])
+
+        assert "Converted thermal band B10 to Celsius" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Parallel Download Tests
+# ---------------------------------------------------------------------------
+
+
+class TestParallelDownloadConstants:
+    """Test parallel download constants are defined correctly."""
+
+    def test_max_parallel_downloads_defined(self) -> None:
+        """Max parallel downloads constant is defined."""
+        assert _MAX_PARALLEL_DOWNLOADS == 4
+
+    def test_max_parallel_downloads_is_reasonable(self) -> None:
+        """Max parallel downloads is a reasonable value (1-10)."""
+        assert 1 <= _MAX_PARALLEL_DOWNLOADS <= 10
+
+
+class TestDownloadSingleBand:
+    """Test _download_single_band helper method."""
+
+    def test_returns_band_name_and_array_on_success(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Returns tuple of (band_name, array, geo_meta) on success."""
+        mock_memfile = MagicMock()
+        mock_dataset = MagicMock()
+        mock_dataset.read.return_value = np.ones((100, 100), dtype=np.float32)
+        mock_dataset.crs = "EPSG:32633"
+        mock_dataset.transform = [10, 0, 500000, 0, -10, 6000000]
+        mock_dataset.bounds = [500000, 5999000, 501000, 6000000]
+        mock_dataset.width = 100
+        mock_dataset.height = 100
+
+        with patch.object(provider, "_retry_request") as mock_retry:
+            mock_resp = MagicMock()
+            mock_resp.content = b"fake_tif_data"
+            mock_retry.return_value = mock_resp
+
+            with patch("rasterio.io.MemoryFile") as mock_mf:
+                mock_mf.return_value.__enter__.return_value = mock_memfile
+                mock_memfile.open.return_value.__enter__.return_value = mock_dataset
+
+                band, arr, geo_meta = provider._download_single_band(
+                    "B4", "https://example.com"
+                )
+
+        assert band == "B4"
+        assert arr is not None
+        assert arr.shape == (100, 100)
+        assert geo_meta["crs"] == "EPSG:32633"
+        assert geo_meta["width"] == 100
+        assert geo_meta["height"] == 100
+
+    def test_returns_none_on_download_failure(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Returns (band_name, None, {}) when download fails."""
+        with patch.object(provider, "_retry_request") as mock_retry:
+            mock_retry.side_effect = ProviderError(
+                what="Download failed", cause="Network error", fix="Retry"
+            )
+
+            band, arr, geo_meta = provider._download_single_band(
+                "B4", "https://example.com"
+            )
+
+        assert band == "B4"
+        assert arr is None
+        assert geo_meta == {}
+
+    def test_returns_none_on_rasterio_failure(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Returns (band_name, None, {}) when rasterio fails to read."""
+        with patch.object(provider, "_retry_request") as mock_retry:
+            mock_resp = MagicMock()
+            mock_resp.content = b"invalid_tif_data"
+            mock_retry.return_value = mock_resp
+
+            with patch("rasterio.io.MemoryFile") as mock_mf:
+                mock_mf.return_value.__enter__.side_effect = Exception("Invalid file")
+
+                band, arr, geo_meta = provider._download_single_band(
+                    "B4", "https://example.com"
+                )
+
+        assert band == "B4"
+        assert arr is None
+        assert geo_meta == {}
+
+    def test_converts_thermal_bands(self, provider: LandsatProvider) -> None:
+        """Thermal bands are converted to Celsius."""
+        mock_memfile = MagicMock()
+        mock_dataset = MagicMock()
+        # DN value for ~0C
+        mock_dataset.read.return_value = np.ones((10, 10), dtype=np.float32) * 36303
+        mock_dataset.crs = "EPSG:32633"
+        mock_dataset.transform = None
+        mock_dataset.bounds = None
+        mock_dataset.width = 10
+        mock_dataset.height = 10
+
+        with patch.object(provider, "_retry_request") as mock_retry:
+            mock_resp = MagicMock()
+            mock_resp.content = b"fake_tif_data"
+            mock_retry.return_value = mock_resp
+
+            with patch("rasterio.io.MemoryFile") as mock_mf:
+                mock_mf.return_value.__enter__.return_value = mock_memfile
+                mock_memfile.open.return_value.__enter__.return_value = mock_dataset
+
+                band, arr, geo_meta = provider._download_single_band(
+                    "B10", "https://example.com"
+                )
+
+        assert band == "B10"
+        assert arr is not None
+        # Should be ~0C after conversion
+        assert arr[0, 0] == pytest.approx(0.0, abs=0.1)
+        assert geo_meta["crs"] == "EPSG:32633"
+
+
+class TestParallelBandDownload:
+    """Test parallel band download functionality in _download_bands."""
+
+    def test_logs_parallel_download_info(
+        self, provider: LandsatProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Logs debug info about parallel downloads."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        item = _mock_stac_item_response().json()
+        signed = _mock_sign_response().json()
+
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_download_single_band") as mock_download:
+                    mock_download.return_value = (
+                        "B2",
+                        np.zeros((100, 100), dtype=np.float32),
+                        {"crs": "EPSG:32633"},
+                    )
+
+                    with caplog.at_level(logging.DEBUG):
+                        provider._download_bands(signed, ["B2"])
+
+        assert "parallel workers" in caplog.text
+
+    def test_maintains_band_order(self, provider: LandsatProvider) -> None:
+        """Parallel downloads maintain requested band order."""
+        signed = {
+            "assets": {
+                "blue": {"href": "https://example.com/B2.tif"},
+                "green": {"href": "https://example.com/B3.tif"},
+                "red": {"href": "https://example.com/B4.tif"},
+                "nir08": {"href": "https://example.com/B5.tif"},
+            }
+        }
+
+        # Return bands in a different order than requested
+        def mock_download(band: str, href: str) -> tuple[str, Any, dict[str, Any]]:
+            return (
+                band,
+                np.ones((100, 100), dtype=np.float32) * ord(band[-1]),
+                {"crs": "EPSG:32633"},
+            )
+
+        with patch.object(provider, "_download_single_band", side_effect=mock_download):
+            _, bands, geo_meta = provider._download_bands(
+                signed, ["B2", "B3", "B4", "B5"]
+            )
+
+        # Should be in original requested order
+        assert bands == ["B2", "B3", "B4", "B5"]
+        assert geo_meta["crs"] == "EPSG:32633"
+
+    def test_handles_partial_failures(self, provider: LandsatProvider) -> None:
+        """Handles partial failures gracefully."""
+        signed = {
+            "assets": {
+                "blue": {"href": "https://example.com/B2.tif"},
+                "green": {"href": "https://example.com/B3.tif"},
+                "red": {"href": "https://example.com/B4.tif"},
+            }
+        }
+
+        def mock_download(band: str, href: str) -> tuple[str, Any, dict[str, Any]]:
+            if band == "B3":
+                return (band, None, {})  # Simulate failure
+            return (band, np.ones((100, 100), dtype=np.float32), {"crs": "EPSG:32633"})
+
+        with patch.object(provider, "_download_single_band", side_effect=mock_download):
+            arr, bands, geo_meta = provider._download_bands(
+                signed, ["B2", "B3", "B4"]
+            )
+
+        # Should only have B2 and B4
+        assert bands == ["B2", "B4"]
+        assert arr.shape[0] == 2
+        # Geo metadata from first successful band
+        assert geo_meta["crs"] == "EPSG:32633"
+
+
+# ---------------------------------------------------------------------------
+# Geo Metadata Tests
+# ---------------------------------------------------------------------------
+
+
+class TestGeoMetadata:
+    """Test CRS and geotransform metadata in download results."""
+
+    def test_download_includes_crs_in_metadata(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Download result includes CRS in metadata."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        item = _mock_stac_item_response().json()
+        signed = _mock_sign_response().json()
+
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_download_bands") as mock_download:
+                    mock_download.return_value = (
+                        np.zeros((3, 100, 100), dtype=np.float32),
+                        ["B4", "B5", "B6"],
+                        {
+                            "crs": "EPSG:32633",
+                            "transform": [10, 0, 500000, 0, -10, 6000000],
+                            "bounds": [500000, 5999000, 501000, 6000000],
+                        },
+                    )
+
+                    result = provider.download(entry)
+
+        assert result.metadata["crs"] == "EPSG:32633"
+        assert result.metadata["transform"] == [10, 0, 500000, 0, -10, 6000000]
+        assert result.metadata["bounds"] == [500000, 5999000, 501000, 6000000]
+
+    def test_download_logs_crs(
+        self, provider: LandsatProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Download logs CRS information."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        item = _mock_stac_item_response().json()
+        signed = _mock_sign_response().json()
+
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_download_bands") as mock_download:
+                    mock_download.return_value = (
+                        np.zeros((3, 100, 100), dtype=np.float32),
+                        ["B4", "B5", "B6"],
+                        {"crs": "EPSG:32633", "transform": None, "bounds": None},
+                    )
+
+                    with caplog.at_level(logging.INFO):
+                        provider.download(entry)
+
+        assert "EPSG:32633" in caplog.text
+
+    def test_geo_metadata_handles_missing_values(
+        self, provider: LandsatProvider
+    ) -> None:
+        """Geo metadata handles None values gracefully."""
+        entry = CatalogEntry(
+            provider="landsat",
+            product_id="LC09_L2SP_182025_20250615_00",
+            timestamp="2025-06-15T10:30:00Z",
+            metadata={"platform": "landsat-9"},
+        )
+
+        item = _mock_stac_item_response().json()
+        signed = _mock_sign_response().json()
+
+        with patch.object(provider, "_fetch_stac_item", return_value=item):
+            with patch.object(provider, "_sign_item", return_value=signed):
+                with patch.object(provider, "_download_bands") as mock_download:
+                    # Return empty geo metadata
+                    mock_download.return_value = (
+                        np.zeros((3, 100, 100), dtype=np.float32),
+                        ["B4", "B5", "B6"],
+                        {},
+                    )
+
+                    result = provider.download(entry)
+
+        # Should have None values, not raise errors
+        assert result.metadata["crs"] is None
+        assert result.metadata["transform"] is None
+        assert result.metadata["bounds"] is None

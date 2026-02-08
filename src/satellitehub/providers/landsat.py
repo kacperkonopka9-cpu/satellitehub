@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -50,6 +51,9 @@ _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504, 408})
 _SUCCESS_STATUS_CODES = frozenset({200})
 _REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307})
 
+# Parallel download settings
+_MAX_PARALLEL_DOWNLOADS = 4  # concurrent band downloads
+
 # ---------------------------------------------------------------------------
 # Landsat band mapping (Collection 2 Level-2)
 # ---------------------------------------------------------------------------
@@ -63,11 +67,18 @@ _BAND_ASSET_MAP: dict[str, str] = {
     "B5": "nir08",  # NIR (30m)
     "B6": "swir16",  # SWIR-1 (30m)
     "B7": "swir22",  # SWIR-2 (30m)
+    "B10": "lwir11",  # Thermal Infrared 1 - TIRS-1 (100m resampled to 30m)
+    "B11": "lwir12",  # Thermal Infrared 2 - TIRS-2 (100m resampled to 30m)
+    "ST_B10": "st_b10",  # Surface Temperature derived from B10 (30m)
     "QA_PIXEL": "qa_pixel",  # Quality Assessment (30m)
+    "QA_RADSAT": "qa_radsat",  # Radiometric Saturation QA (30m)
 }
 
 # Default bands to download (common optical + quality)
 _DEFAULT_BANDS = ["B2", "B3", "B4", "B5", "B6", "B7", "QA_PIXEL"]
+
+# Thermal bands for land surface temperature analysis
+_THERMAL_BANDS = ["B10", "B11", "ST_B10"]
 
 # Landsat L2A standard band list for CatalogEntry
 _LANDSAT_L2_BANDS = [
@@ -78,7 +89,11 @@ _LANDSAT_L2_BANDS = [
     "B5",
     "B6",
     "B7",
+    "B10",
+    "B11",
+    "ST_B10",
     "QA_PIXEL",
+    "QA_RADSAT",
 ]
 
 # Sentinel-2 equivalent mapping for documentation/reference
@@ -90,10 +105,50 @@ _SENTINEL2_EQUIVALENT: dict[str, str] = {
     "B6": "B11",  # SWIR1
     "B7": "B12",  # SWIR2
     "QA_PIXEL": "SCL",  # Quality mask
+    # B10, B11, ST_B10 have no Sentinel-2 equivalent (no thermal bands on S2)
 }
+
+# Thermal band scale factors for Collection 2 Level-2
+# Raw thermal bands (B10, B11) are in scaled Kelvin: DN * 0.00341802 + 149.0 = K
+# Surface Temperature (ST_B10) is also scaled: DN * 0.00341802 + 149.0 = K
+_THERMAL_SCALE_FACTOR = 0.00341802
+_THERMAL_OFFSET = 149.0
+_KELVIN_TO_CELSIUS = 273.15
 
 # Buffer in degrees for bbox queries (~10km at equator)
 _BBOX_BUFFER_DEG = 0.1
+
+
+def _convert_thermal_to_celsius(
+    data: npt.NDArray[np.floating[Any]],
+) -> npt.NDArray[np.floating[Any]]:
+    """Convert Landsat thermal band DN values to Celsius.
+
+    Applies the Collection 2 Level-2 scaling formula:
+    Temperature (K) = DN * 0.00341802 + 149.0
+    Temperature (C) = Temperature (K) - 273.15
+
+    Args:
+        data: Raw thermal band digital numbers.
+
+    Returns:
+        Temperature in Celsius.
+    """
+    kelvin = data * _THERMAL_SCALE_FACTOR + _THERMAL_OFFSET
+    celsius: npt.NDArray[np.floating[Any]] = kelvin - _KELVIN_TO_CELSIUS
+    return celsius
+
+
+def _is_thermal_band(band: str) -> bool:
+    """Check if a band is a thermal band requiring temperature conversion.
+
+    Args:
+        band: Band identifier (e.g., 'B10', 'ST_B10').
+
+    Returns:
+        True if the band contains thermal/temperature data.
+    """
+    return band in {"B10", "B11", "ST_B10"}
 
 
 def _compute_bbox(
@@ -389,7 +444,9 @@ class LandsatProvider(DataProvider):
             )
 
         # Download and stack bands
-        array, extracted_bands = self._download_bands(signed_item, target_bands)
+        array, extracted_bands, geo_meta = self._download_bands(
+            signed_item, target_bands
+        )
 
         if array.size == 0:
             raise ProviderError(
@@ -398,10 +455,14 @@ class LandsatProvider(DataProvider):
                 fix="Try again; product may be temporarily unavailable",
             )
 
+        # Identify which bands are thermal (converted to Celsius)
+        thermal_bands = [b for b in extracted_bands if _is_thermal_band(b)]
+
         logger.info(
-            "Download complete: %d bands, shape %s",
+            "Download complete: %d bands, shape %s, crs=%s",
             len(extracted_bands),
             array.shape,
+            geo_meta.get("crs", "unknown"),
         )
 
         return RawData(
@@ -411,6 +472,12 @@ class LandsatProvider(DataProvider):
                 "bands": extracted_bands,
                 "timestamp": entry.timestamp,
                 "platform": entry.metadata.get("platform", ""),
+                "thermal_bands": thermal_bands,
+                "thermal_unit": "celsius" if thermal_bands else None,
+                # Geo metadata for geolocation
+                "crs": geo_meta.get("crs"),
+                "transform": geo_meta.get("transform"),
+                "bounds": geo_meta.get("bounds"),
             },
         )
 
@@ -462,12 +529,71 @@ class LandsatProvider(DataProvider):
             logger.warning("Planetary Computer signing failed: %s", exc)
             return None
 
+    def _download_single_band(
+        self,
+        band: str,
+        href: str,
+    ) -> tuple[str, npt.NDArray[np.floating[Any]] | None, dict[str, Any]]:
+        """Download and process a single band.
+
+        Args:
+            band: Band identifier (e.g., 'B4', 'B10').
+            href: Signed download URL for the band.
+
+        Returns:
+            Tuple of (band name, array, geo_metadata) or (band name, None, {})
+            on failure. geo_metadata contains 'crs', 'transform', 'bounds'.
+        """
+        from rasterio.io import MemoryFile  # noqa: PLC0415
+
+        try:
+            resp = self._retry_request("get", href, stream=True)
+            data = resp.content
+        except ProviderError as exc:
+            logger.warning("Failed to download band %s: %s", band, exc)
+            return (band, None, {})
+
+        try:
+            with MemoryFile(data) as memfile, memfile.open() as dataset:
+                arr: npt.NDArray[np.floating[Any]] = dataset.read(1).astype(
+                    np.float32
+                )
+
+                # Extract geo metadata
+                transform = dataset.transform
+                geo_meta: dict[str, Any] = {
+                    "crs": str(dataset.crs) if dataset.crs else None,
+                    "transform": list(transform)[:6] if transform else None,
+                    "bounds": list(dataset.bounds) if dataset.bounds else None,
+                    "width": dataset.width,
+                    "height": dataset.height,
+                }
+
+                # Convert thermal bands to Celsius
+                if _is_thermal_band(band):
+                    arr = _convert_thermal_to_celsius(arr)
+                    logger.debug(
+                        "Converted thermal band %s to Celsius (%.1f to %.1f)",
+                        band,
+                        float(np.nanmin(arr)),
+                        float(np.nanmax(arr)),
+                    )
+
+                return (band, arr, geo_meta)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read band %s: %s", band, exc)
+            return (band, None, {})
+
     def _download_bands(
         self,
         item: dict[str, Any],
         bands: list[str],
-    ) -> tuple[npt.NDArray[np.floating[Any]], list[str]]:
+    ) -> tuple[npt.NDArray[np.floating[Any]], list[str], dict[str, Any]]:
         """Download and stack spectral bands from a signed STAC item.
+
+        Downloads bands in parallel using ThreadPoolExecutor for improved
+        performance. Bands are downloaded concurrently but the final array
+        maintains the requested band order.
 
         Args:
             item: Signed STAC item with asset URLs.
@@ -476,15 +602,12 @@ class LandsatProvider(DataProvider):
         Returns:
             Tuple of (stacked numpy array with shape
             ``(n_bands, height, width)``, list of band names actually
-            extracted).
+            extracted, geo metadata dict with 'crs', 'transform', 'bounds').
         """
-        from rasterio.io import MemoryFile  # noqa: PLC0415
-
         assets = item.get("assets", {})
-        band_arrays: list[npt.NDArray[np.floating[Any]]] = []
-        extracted_bands: list[str] = []
-        target_shape: tuple[int, ...] | None = None
 
+        # Build list of (band, href) tuples for valid bands
+        download_tasks: list[tuple[str, str]] = []
         for band in bands:
             asset_key = _BAND_ASSET_MAP.get(band)
             if asset_key is None:
@@ -503,33 +626,53 @@ class LandsatProvider(DataProvider):
                 logger.warning("Band %s has no download URL", band)
                 continue
 
-            # Download the COG
-            try:
-                resp = self._retry_request("get", href, stream=True)
-                data = resp.content
-            except ProviderError as exc:
-                logger.warning("Failed to download band %s: %s", band, exc)
-                continue
+            download_tasks.append((band, href))
 
-            # Read with rasterio
-            try:
-                with MemoryFile(data) as memfile, memfile.open() as dataset:
-                    arr: npt.NDArray[np.floating[Any]] = dataset.read(1).astype(
-                        np.float32
-                    )
+        if not download_tasks:
+            return np.array([], dtype=np.float32), [], {}
 
-                    # Set target shape from first band
+        # Download bands in parallel (array, geo_metadata) tuples
+        results: dict[
+            str, tuple[npt.NDArray[np.floating[Any]] | None, dict[str, Any]]
+        ] = {}
+        max_workers = min(_MAX_PARALLEL_DOWNLOADS, len(download_tasks))
+
+        logger.debug(
+            "Downloading %d bands with %d parallel workers",
+            len(download_tasks),
+            max_workers,
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._download_single_band, band, href): band
+                for band, href in download_tasks
+            }
+
+            for future in as_completed(futures):
+                band_name, arr, geo_meta = future.result()
+                results[band_name] = (arr, geo_meta)
+
+        # Collect results in original band order (maintains consistency)
+        band_arrays: list[npt.NDArray[np.floating[Any]]] = []
+        extracted_bands: list[str] = []
+        target_shape: tuple[int, ...] | None = None
+        geo_metadata: dict[str, Any] = {}
+
+        for band, _ in download_tasks:
+            result = results.get(band)
+            if result is not None:
+                arr, geo_meta = result
+                if arr is not None:
                     if target_shape is None:
                         target_shape = arr.shape
-
+                        # Use geo metadata from first successfully downloaded band
+                        geo_metadata = geo_meta
                     band_arrays.append(arr)
                     extracted_bands.append(band)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to read band %s: %s", band, exc)
-                continue
 
         if not band_arrays:
-            return np.array([], dtype=np.float32), []
+            return np.array([], dtype=np.float32), [], {}
 
         # Resample bands to common shape if needed (nearest neighbor)
         if target_shape is not None:
@@ -548,7 +691,7 @@ class LandsatProvider(DataProvider):
                 resampled.append(arr)
             band_arrays = resampled
 
-        return np.stack(band_arrays), extracted_bands
+        return np.stack(band_arrays), extracted_bands, geo_metadata
 
     def _retry_request(
         self,

@@ -344,7 +344,8 @@ class IMGWProvider(DataProvider):
             )
 
         # Build API URL for station data (MVP: current observation only)
-        url = f"{_IMGW_SYNOP_URL}/station/{station_id}"
+        # API endpoint: /api/data/synop/id/{station_id}/format/json
+        url = f"{_IMGW_SYNOP_URL}/id/{station_id}/format/json"
 
         # MVP: Log that we're fetching current data, not historical
         logger.info(
