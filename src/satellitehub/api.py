@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING, overload
 
 from satellitehub.location import Location
 from satellitehub.location import location as create_location
-from satellitehub.results import ChangeResult, VegetationResult, WeatherResult
+from satellitehub.results import (
+    ChangeResult,
+    ThermalResult,
+    VegetationResult,
+    WeatherResult,
+)
 
 if TYPE_CHECKING:
     from satellitehub.config import Config
@@ -286,3 +291,72 @@ def weather(
     """
     location = _resolve_location(loc_or_lat, lon, config)
     return location.weather(last_days=last_days)
+
+
+# ── Thermal Analysis ───────────────────────────────────────────────────
+
+
+@overload
+def thermal_analysis(
+    loc_or_lat: Location,
+    lon: None = None,
+    *,
+    last_days: int = ...,
+    thermal_band: str = ...,
+    cloud_max: float = ...,
+    config: None = None,
+) -> ThermalResult: ...
+
+
+@overload
+def thermal_analysis(
+    loc_or_lat: float,
+    lon: float,
+    *,
+    last_days: int = ...,
+    thermal_band: str = ...,
+    cloud_max: float = ...,
+    config: Config | None = None,
+) -> ThermalResult: ...
+
+
+def thermal_analysis(
+    loc_or_lat: Location | float,
+    lon: float | None = None,
+    *,
+    last_days: int = 60,
+    thermal_band: str = "ST_B10",
+    cloud_max: float = 0.3,
+    config: Config | None = None,
+) -> ThermalResult:
+    """Analyze land surface temperature using Landsat thermal bands.
+
+    Retrieves Landsat 8/9 thermal imagery and computes temperature
+    statistics for the specified location and time period.
+
+    Args:
+        loc_or_lat: A Location object, or latitude in WGS84 degrees.
+        lon: Longitude in WGS84 degrees (required if first arg is latitude).
+        last_days: Number of days to look back. Defaults to 60 (Landsat has
+            16-day revisit frequency).
+        thermal_band: Thermal band to use. Options:
+            - ``"ST_B10"`` (default): Surface Temperature from Band 10.
+            - ``"B10"``: Raw thermal infrared band 1.
+            - ``"B11"``: Raw thermal infrared band 2.
+        cloud_max: Maximum acceptable cloud cover (0.0--1.0). Defaults to 0.3.
+        config: Optional configuration override.
+
+    Returns:
+        ThermalResult with temperature statistics in Celsius.
+
+    Example:
+        >>> import satellitehub as sh
+        >>> result = sh.thermal_analysis(52.23, 21.01, last_days=60)
+        >>> print(f"Mean LST: {result.mean_temperature:.1f}C")
+    """
+    location = _resolve_location(loc_or_lat, lon, config)
+    return location.thermal_analysis(
+        last_days=last_days,
+        thermal_band=thermal_band,
+        cloud_max=cloud_max,
+    )

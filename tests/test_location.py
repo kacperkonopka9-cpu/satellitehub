@@ -21,7 +21,12 @@ from satellitehub.providers.base import CatalogEntry, DataProvider
 from satellitehub.providers.cds import CDSProvider
 from satellitehub.providers.cdse import CDSEProvider
 from satellitehub.providers.imgw import IMGWProvider
-from satellitehub.results import BaseResult, ChangeResult, VegetationResult
+from satellitehub.results import (
+    BaseResult,
+    ChangeResult,
+    ThermalResult,
+    VegetationResult,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1441,3 +1446,252 @@ class TestVegetationChange:
                 period_1=("2025-01-01", "2025-01-31"),
                 period_2=("2026-01-01", "2026-01-31"),
             )
+
+
+class TestThermalAnalysis:
+    """Tests for Location.thermal_analysis() semantic method."""
+
+    def test_thermal_analysis_returns_thermal_result(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Standard case returns ThermalResult with temperature statistics."""
+        loc = location(lat=51.25, lon=22.57)
+
+        # Create synthetic thermal data: temperatures in Celsius
+        thermal_data = np.ones((1, 10, 10), dtype=np.float32) * 28.5
+        thermal_data[0, 0, 0] = 25.0  # min
+        thermal_data[0, 9, 9] = 32.0  # max
+
+        raw = RawData(
+            data=thermal_data,
+            metadata={
+                "timestamp": "2024-06-15T10:30:00Z",
+                "bounds": {"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0},
+                "crs": "EPSG:32634",
+                "cloud_cover_pct": 15.0,
+            },
+        )
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(
+            _pl,
+            "_acquire",
+            lambda location, provider_name, product, bands, cloud_max, last_days: raw,
+        )
+
+        result = loc.thermal_analysis(last_days=60)
+
+        assert isinstance(result, ThermalResult)
+        assert result.confidence > 0
+        assert result.mean_temperature == pytest.approx(28.5, abs=0.1)
+        assert result.temperature_min == pytest.approx(25.0, abs=0.1)
+        assert result.temperature_max == pytest.approx(32.0, abs=0.1)
+        assert result.thermal_unit == "celsius"
+        assert result.thermal_band == "ST_B10"
+        assert result.metadata.source == "landsat"
+
+    def test_thermal_analysis_no_data_returns_zero_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No data returns confidence=0.0 with descriptive warnings."""
+        loc = location(lat=51.25, lon=22.57)
+
+        empty_raw = RawData(data=np.array([], dtype=np.float32), metadata={})
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(
+            _pl,
+            "_acquire",
+            lambda location, provider_name, product, bands, cloud_max, last_days: (
+                empty_raw
+            ),
+        )
+
+        result = loc.thermal_analysis(last_days=60)
+
+        assert result.confidence == 0.0
+        assert result.data.size == 0
+        assert np.isnan(result.mean_temperature)
+        assert np.isnan(result.temperature_min)
+        assert np.isnan(result.temperature_max)
+        assert len(result.warnings) >= 1
+
+    def test_thermal_analysis_includes_suggestion_for_no_data(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Warnings include suggestion to increase last_days."""
+        loc = location(lat=51.25, lon=22.57)
+
+        empty_raw = RawData(data=np.array([], dtype=np.float32), metadata={})
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(
+            _pl,
+            "_acquire",
+            lambda location, provider_name, product, bands, cloud_max, last_days: (
+                empty_raw
+            ),
+        )
+
+        result = loc.thermal_analysis(last_days=60)
+
+        suggestion_found = any("last_days" in w for w in result.warnings)
+        assert suggestion_found, f"Expected suggestion in warnings: {result.warnings}"
+
+    def test_thermal_analysis_accepts_thermal_band_parameter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Can specify different thermal bands (B10, B11, ST_B10)."""
+        loc = location(lat=51.25, lon=22.57)
+
+        thermal_data = np.ones((1, 5, 5), dtype=np.float32) * 30.0
+        raw = RawData(
+            data=thermal_data,
+            metadata={"timestamp": "2024-06-15T10:30:00Z"},
+        )
+
+        import satellitehub._pipeline as _pl
+
+        captured_bands: list[list[str]] = []
+
+        def mock_acquire(
+            location: object,
+            provider_name: str,
+            product: str,
+            bands: list[str],
+            cloud_max: float,
+            last_days: int,
+        ) -> RawData:
+            captured_bands.append(bands)
+            return raw
+
+        monkeypatch.setattr(_pl, "_acquire", mock_acquire)
+
+        result = loc.thermal_analysis(thermal_band="B10")
+
+        assert captured_bands[0] == ["B10"]
+        assert result.thermal_band == "B10"
+
+    def test_thermal_analysis_uses_landsat_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uses the Landsat provider for thermal data."""
+        loc = location(lat=51.25, lon=22.57)
+
+        thermal_data = np.ones((1, 5, 5), dtype=np.float32) * 25.0
+        raw = RawData(
+            data=thermal_data,
+            metadata={"timestamp": "2024-06-15T10:30:00Z"},
+        )
+
+        import satellitehub._pipeline as _pl
+
+        captured_provider: list[str] = []
+
+        def mock_acquire(
+            location: object,
+            provider_name: str,
+            product: str,
+            bands: list[str],
+            cloud_max: float,
+            last_days: int,
+        ) -> RawData:
+            captured_provider.append(provider_name)
+            return raw
+
+        monkeypatch.setattr(_pl, "_acquire", mock_acquire)
+
+        loc.thermal_analysis(last_days=60)
+
+        assert captured_provider[0] == "landsat"
+
+    def test_thermal_analysis_provider_error_returns_zero_confidence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Provider error returns graceful fallback with zero confidence."""
+        loc = location(lat=51.25, lon=22.57)
+
+        import satellitehub._pipeline as _pl
+
+        def raise_provider_error(
+            location: object,
+            provider_name: str,
+            product: str,
+            bands: list[str],
+            cloud_max: float,
+            last_days: int,
+        ) -> None:
+            raise ProviderError(
+                what="Landsat API unreachable",
+                cause="Connection timeout",
+                fix="Try again later",
+            )
+
+        monkeypatch.setattr(_pl, "_acquire", raise_provider_error)
+
+        result = loc.thermal_analysis(last_days=60)
+
+        assert result.confidence == 0.0
+        assert len(result.warnings) >= 1
+
+    def test_thermal_analysis_filters_invalid_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Filters out extreme/invalid temperature values."""
+        loc = location(lat=51.25, lon=22.57)
+
+        # Include some invalid values (too cold, too hot)
+        thermal_data = np.ones((1, 5, 5), dtype=np.float32) * 25.0
+        thermal_data[0, 0, 0] = -100.0  # too cold
+        thermal_data[0, 0, 1] = 100.0  # too hot
+        thermal_data[0, 0, 2] = np.nan  # NaN
+
+        raw = RawData(
+            data=thermal_data,
+            metadata={"timestamp": "2024-06-15T10:30:00Z"},
+        )
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(
+            _pl,
+            "_acquire",
+            lambda location, provider_name, product, bands, cloud_max, last_days: raw,
+        )
+
+        result = loc.thermal_analysis(last_days=60)
+
+        # Mean should be close to 25.0 (filtering out invalid values)
+        assert result.mean_temperature == pytest.approx(25.0, abs=0.5)
+
+    def test_thermal_analysis_low_coverage_adds_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Low valid data coverage adds warning to result."""
+        loc = location(lat=51.25, lon=22.57)
+
+        # Mostly invalid values (NaN or out of range)
+        thermal_data = np.full((1, 10, 10), np.nan, dtype=np.float32)
+        thermal_data[0, 0, 0] = 25.0  # Only 1 valid value out of 100
+
+        raw = RawData(
+            data=thermal_data,
+            metadata={"timestamp": "2024-06-15T10:30:00Z"},
+        )
+
+        import satellitehub._pipeline as _pl
+
+        monkeypatch.setattr(
+            _pl,
+            "_acquire",
+            lambda location, provider_name, product, bands, cloud_max, last_days: raw,
+        )
+
+        result = loc.thermal_analysis(last_days=60)
+
+        assert result.confidence < 0.5
+        coverage_warning = any("coverage" in w.lower() for w in result.warnings)
+        assert coverage_warning, f"Expected coverage warning: {result.warnings}"

@@ -147,6 +147,21 @@ class TestBaseResult:
         result.warnings.append("test warning")
         assert len(result.warnings) == 1
 
+    @pytest.mark.unit
+    def test_narrative_returns_string(self) -> None:
+        result = BaseResult(data=np.array([], dtype=np.float32))
+        narrative = result.narrative()
+        assert isinstance(narrative, str)
+        assert "BaseResult" in narrative
+
+    @pytest.mark.unit
+    def test_narrative_matches_repr(self) -> None:
+        result = BaseResult(
+            data=np.zeros((2, 10, 10), dtype=np.float32),
+            confidence=0.75,
+        )
+        assert result.narrative() == repr(result)
+
 
 # ── _interpret_ndvi tests ────────────────────────────────────────
 
@@ -231,6 +246,27 @@ class TestVegetationResult:
     def test_inherits_base_result(self) -> None:
         result = VegetationResult(data=np.array([], dtype=np.float32))
         assert isinstance(result, BaseResult)
+
+    def test_narrative_returns_detailed_string(self) -> None:
+        meta = ResultMetadata(
+            source="cdse",
+            timestamps=["2026-01-05T10:00:00Z"],
+            bounds={"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0},
+        )
+        result = VegetationResult(
+            data=np.ones((10, 10), dtype=np.float32) * 0.45,
+            confidence=0.8,
+            metadata=meta,
+            mean_ndvi=0.45,
+            ndvi_std=0.05,
+            observation_count=3,
+            cloud_free_count=2,
+        )
+        narrative = result.narrative()
+        assert isinstance(narrative, str)
+        assert "VegetationResult" in narrative
+        assert "0.45" in narrative
+        assert "moderate vegetation" in narrative
 
     def test_public_import(self) -> None:
         from satellitehub import VegetationResult as VegResult
@@ -724,6 +760,27 @@ class TestThermalResult:
     def test_inherits_base_result(self) -> None:
         result = ThermalResult(data=np.array([], dtype=np.float32))
         assert isinstance(result, BaseResult)
+
+    def test_narrative_returns_detailed_string(self) -> None:
+        meta = ResultMetadata(
+            source="landsat",
+            timestamps=["2024-06-15T10:30:00Z"],
+            bounds={"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0},
+        )
+        result = ThermalResult(
+            data=np.ones((10, 10), dtype=np.float32) * 28.5,
+            confidence=0.85,
+            metadata=meta,
+            mean_temperature=28.5,
+            temperature_min=24.0,
+            temperature_max=32.0,
+            thermal_band="ST_B10",
+        )
+        narrative = result.narrative()
+        assert isinstance(narrative, str)
+        assert "ThermalResult" in narrative
+        assert "28.5" in narrative
+        assert "warm surface" in narrative
 
 
 @pytest.mark.unit

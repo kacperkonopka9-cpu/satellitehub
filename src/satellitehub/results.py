@@ -248,6 +248,28 @@ class BaseResult:
             parts.append(f"warnings={warn_count}")
         return f"{cls_name}({', '.join(parts)})"
 
+    def narrative(self) -> str:
+        """Return a human-readable narrative summary of the analysis result.
+
+        Provides a plain-language description of the result suitable for
+        display to end users. Subclasses with domain-specific fields
+        (VegetationResult, WeatherResult, etc.) return more detailed
+        narratives including interpretation of the data.
+
+        Returns:
+            Multi-line string with the result summary.
+
+        Example:
+            >>> result = VegetationResult(data=np.array([]), mean_ndvi=0.42)
+            >>> print(result.narrative())  # doctest: +SKIP
+            VegetationResult(
+              location: 51.50°N, 22.50°E
+              mean_ndvi: 0.42 ± 0.08 — moderate vegetation
+              ...
+            )
+        """
+        return repr(self)
+
     def to_dataframe(self) -> pd.DataFrame:
         """Export result data to a pandas DataFrame.
 

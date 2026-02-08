@@ -14,7 +14,12 @@ Example:
 """
 
 from satellitehub.__about__ import __version__
-from satellitehub.api import change_detection, vegetation_health, weather
+from satellitehub.api import (
+    change_detection,
+    thermal_analysis,
+    vegetation_health,
+    weather,
+)
 from satellitehub.config import Config, configure
 from satellitehub.exceptions import (
     CacheError,
@@ -37,6 +42,7 @@ __all__ = [
     "__version__",
     # Semantic API (top-level functions)
     "change_detection",
+    "thermal_analysis",
     "vegetation_health",
     "weather",
     # Location

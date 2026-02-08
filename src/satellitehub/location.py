@@ -24,6 +24,7 @@ from satellitehub.results import (
     BaseResult,
     ChangeResult,
     ResultMetadata,
+    ThermalResult,
     VegetationResult,
     WeatherResult,
 )
@@ -1210,6 +1211,174 @@ class Location:
         )
 
         return result
+
+    def thermal_analysis(
+        self,
+        last_days: int = 60,
+        thermal_band: str = "ST_B10",
+        cloud_max: float = 0.3,
+    ) -> ThermalResult:
+        """Analyze land surface temperature using Landsat thermal bands.
+
+        Retrieves Landsat 8/9 thermal imagery, computes temperature statistics,
+        and returns a ThermalResult with mean, min, max, and standard deviation.
+
+        Land surface temperature (LST) differs from air temperature: surfaces
+        like asphalt, bare soil, or rooftops can be significantly hotter than
+        the surrounding air, especially in summer.
+
+        Args:
+            last_days: Number of days to look back from today. Defaults to 60
+                (longer than vegetation due to lower revisit frequency).
+            thermal_band: Thermal band to use. Options:
+                - ``"ST_B10"`` (default): Surface Temperature derived from B10,
+                  recommended for land surface temperature analysis.
+                - ``"B10"``: Raw thermal infrared band 1 (TIRS-1).
+                - ``"B11"``: Raw thermal infrared band 2 (TIRS-2).
+            cloud_max: Maximum acceptable cloud cover fraction (0.0--1.0).
+                Defaults to 0.3 (30%).
+
+        Returns:
+            ThermalResult with temperature statistics in Celsius, confidence
+            score, and quality metadata. If no cloud-free data is available,
+            returns a result with confidence=0.0 and descriptive warnings.
+
+        Example:
+            >>> import satellitehub as sh
+            >>> field = sh.location(lat=51.25, lon=22.57)
+            >>> result = field.thermal_analysis(last_days=60)
+            >>> result.mean_temperature  # doctest: +SKIP
+            28.5
+            >>> result.thermal_band  # doctest: +SKIP
+            'ST_B10'
+        """
+        from satellitehub._pipeline import _acquire
+
+        # Validate thermal band
+        valid_bands = {"ST_B10", "B10", "B11"}
+        if thermal_band not in valid_bands:
+            logger.warning(
+                "Invalid thermal band '%s', using 'ST_B10'. Valid: %s",
+                thermal_band,
+                valid_bands,
+            )
+            thermal_band = "ST_B10"
+
+        # Acquire Landsat thermal data
+        try:
+            raw = _acquire(
+                location=self,
+                provider_name="landsat",
+                product="landsat-c2-l2",
+                bands=[thermal_band],
+                cloud_max=cloud_max,
+                last_days=last_days,
+            )
+        except (ProviderError, ConfigurationError) as exc:
+            logger.warning("Landsat thermal data acquisition failed: %s", exc)
+            return ThermalResult(
+                data=np.array([], dtype=np.float32),
+                confidence=0.0,
+                metadata=ResultMetadata(source="landsat"),
+                warnings=[str(exc)],
+                mean_temperature=float("nan"),
+                temperature_min=float("nan"),
+                temperature_max=float("nan"),
+                temperature_std=float("nan"),
+                thermal_unit="celsius",
+                thermal_band=thermal_band,
+            )
+
+        # Handle no-data case
+        if raw.data.size == 0:
+            logger.info("No Landsat thermal data available for thermal_analysis")
+            return ThermalResult(
+                data=np.array([], dtype=np.float32),
+                confidence=0.0,
+                metadata=ResultMetadata(source="landsat"),
+                warnings=[
+                    "No Landsat thermal data found for the requested period",
+                    "Landsat has 16-day revisit; try increasing last_days parameter",
+                ],
+                mean_temperature=float("nan"),
+                temperature_min=float("nan"),
+                temperature_max=float("nan"),
+                temperature_std=float("nan"),
+                thermal_unit="celsius",
+                thermal_band=thermal_band,
+            )
+
+        # Compute temperature statistics
+        # Data is already in Celsius (Landsat provider converts from Kelvin)
+        thermal_data = raw.data
+        if thermal_data.ndim == 3:
+            thermal_data = thermal_data[0]  # Get first band if 3D
+
+        # Mask invalid values (e.g., fill values, extreme outliers)
+        valid_mask = (
+            np.isfinite(thermal_data)
+            & (thermal_data > -50)
+            & (thermal_data < 80)
+        )
+        valid_temps = thermal_data[valid_mask]
+
+        if valid_temps.size == 0:
+            logger.info("No valid thermal data after filtering")
+            return ThermalResult(
+                data=raw.data,
+                confidence=0.0,
+                metadata=ResultMetadata(source="landsat"),
+                warnings=["No valid thermal data after cloud/fill value filtering"],
+                mean_temperature=float("nan"),
+                temperature_min=float("nan"),
+                temperature_max=float("nan"),
+                temperature_std=float("nan"),
+                thermal_unit="celsius",
+                thermal_band=thermal_band,
+            )
+
+        mean_temp = float(np.mean(valid_temps))
+        min_temp = float(np.min(valid_temps))
+        max_temp = float(np.max(valid_temps))
+        std_temp = float(np.std(valid_temps))
+
+        # Calculate confidence based on valid data coverage
+        valid_ratio = valid_temps.size / thermal_data.size
+        confidence = min(valid_ratio, 1.0)
+
+        # Build result metadata
+        meta = raw.metadata
+        result_meta = ResultMetadata(
+            source="landsat",
+            timestamps=[meta.get("timestamp", "")],
+            observation_count=1,
+            cloud_cover_pct=meta.get("cloud_cover_pct", 0.0),
+            crs=meta.get("crs", ""),
+            bounds=meta.get("bounds", {}),
+            resolution_m=meta.get("resolution_m", 30.0),
+            bands=[thermal_band],
+        )
+
+        # Build warnings list
+        warnings: list[str] = []
+        if confidence < 0.5:
+            warnings.append(
+                f"Low valid data coverage ({confidence:.0%}); "
+                "results may not be representative"
+            )
+
+        return ThermalResult(
+            data=raw.data,
+            confidence=confidence,
+            metadata=result_meta,
+            warnings=warnings,
+            mean_temperature=mean_temp,
+            temperature_min=min_temp,
+            temperature_max=max_temp,
+            temperature_std=std_temp,
+            thermal_unit="celsius",
+            thermal_band=thermal_band,
+        )
 
     @staticmethod
     def _determine_change_direction(
