@@ -12,6 +12,7 @@ from satellitehub.results import (
     ResultMetadata,
     ThermalResult,
     VegetationResult,
+    WeatherResult,
     _interpret_change,
     _interpret_ndvi,
     _interpret_surface_temperature,
@@ -162,6 +163,26 @@ class TestBaseResult:
         )
         assert result.narrative() == repr(result)
 
+    @pytest.mark.unit
+    def test_to_html_returns_string(self) -> None:
+        result = BaseResult(
+            data=np.zeros((10, 10), dtype=np.float32),
+            confidence=0.8,
+        )
+        html = result.to_html()
+        assert isinstance(html, str)
+        assert "<!DOCTYPE html>" in html
+        assert "BaseResult" in html
+
+    @pytest.mark.unit
+    def test_to_html_contains_confidence(self) -> None:
+        result = BaseResult(
+            data=np.zeros((10, 10), dtype=np.float32),
+            confidence=0.75,
+        )
+        html = result.to_html()
+        assert "75%" in html
+
 
 # ── _interpret_ndvi tests ────────────────────────────────────────
 
@@ -267,6 +288,28 @@ class TestVegetationResult:
         assert "VegetationResult" in narrative
         assert "0.45" in narrative
         assert "moderate vegetation" in narrative
+
+    def test_to_html_contains_ndvi_metrics(self) -> None:
+        meta = ResultMetadata(
+            source="cdse",
+            timestamps=["2026-01-05T10:00:00Z"],
+            bounds={"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0},
+        )
+        result = VegetationResult(
+            data=np.ones((10, 10), dtype=np.float32) * 0.45,
+            confidence=0.8,
+            metadata=meta,
+            mean_ndvi=0.45,
+            ndvi_std=0.05,
+            observation_count=3,
+            cloud_free_count=2,
+        )
+        html = result.to_html()
+        assert isinstance(html, str)
+        assert "<!DOCTYPE html>" in html
+        assert "Vegetation Health" in html
+        assert "0.45" in html
+        assert "Mean NDVI" in html
 
     def test_public_import(self) -> None:
         from satellitehub import VegetationResult as VegResult
@@ -665,6 +708,85 @@ class TestChangeResultRepr:
         assert r1 == r2
 
 
+@pytest.mark.unit
+class TestChangeResultNarrative:
+    """Tests for ChangeResult.narrative() method."""
+
+    def test_narrative_returns_string(self) -> None:
+        result = ChangeResult(
+            data=np.array([], dtype=np.float32),
+            confidence=0.65,
+            period_1_ndvi=0.42,
+            period_2_ndvi=0.27,
+            delta=-0.15,
+            direction="declining",
+        )
+        narrative = result.narrative()
+        assert isinstance(narrative, str)
+        assert "ChangeResult" in narrative
+
+    def test_narrative_matches_repr(self) -> None:
+        result = ChangeResult(
+            data=np.array([], dtype=np.float32),
+            confidence=0.65,
+            period_1_ndvi=0.42,
+            period_2_ndvi=0.27,
+            delta=-0.15,
+            direction="declining",
+        )
+        assert result.narrative() == repr(result)
+
+    def test_narrative_contains_direction(self) -> None:
+        result = ChangeResult(
+            data=np.array([], dtype=np.float32),
+            confidence=0.65,
+            period_1_ndvi=0.42,
+            period_2_ndvi=0.27,
+            delta=-0.15,
+            direction="declining",
+        )
+        narrative = result.narrative()
+        assert "decline" in narrative.lower()
+
+
+@pytest.mark.unit
+class TestWeatherResultNarrative:
+    """Tests for WeatherResult.narrative() method."""
+
+    def test_narrative_returns_string(self) -> None:
+        result = WeatherResult(
+            data=np.array([], dtype=np.float32),
+            confidence=0.75,
+            mean_temperature=12.5,
+            total_precipitation=45.2,
+            observation_count=30,
+        )
+        narrative = result.narrative()
+        assert isinstance(narrative, str)
+        assert "WeatherResult" in narrative
+
+    def test_narrative_matches_repr(self) -> None:
+        result = WeatherResult(
+            data=np.array([], dtype=np.float32),
+            confidence=0.75,
+            mean_temperature=12.5,
+            total_precipitation=45.2,
+            observation_count=30,
+        )
+        assert result.narrative() == repr(result)
+
+    def test_narrative_contains_temperature(self) -> None:
+        result = WeatherResult(
+            data=np.array([], dtype=np.float32),
+            confidence=0.75,
+            mean_temperature=12.5,
+            total_precipitation=45.2,
+            observation_count=30,
+        )
+        narrative = result.narrative()
+        assert "12.5" in narrative or "temperature" in narrative.lower()
+
+
 # ── _interpret_surface_temperature tests ────────────────────────────────────────
 
 
@@ -781,6 +903,28 @@ class TestThermalResult:
         assert "ThermalResult" in narrative
         assert "28.5" in narrative
         assert "warm surface" in narrative
+
+    def test_to_html_contains_temperature_metrics(self) -> None:
+        meta = ResultMetadata(
+            source="landsat",
+            timestamps=["2024-06-15T10:30:00Z"],
+            bounds={"minx": 22.0, "miny": 51.0, "maxx": 23.0, "maxy": 52.0},
+        )
+        result = ThermalResult(
+            data=np.ones((10, 10), dtype=np.float32) * 28.5,
+            confidence=0.85,
+            metadata=meta,
+            mean_temperature=28.5,
+            temperature_min=24.0,
+            temperature_max=32.0,
+            thermal_band="ST_B10",
+        )
+        html = result.to_html()
+        assert isinstance(html, str)
+        assert "<!DOCTYPE html>" in html
+        assert "Land Surface Temperature" in html
+        assert "28.5" in html
+        assert "ST_B10" in html
 
 
 @pytest.mark.unit

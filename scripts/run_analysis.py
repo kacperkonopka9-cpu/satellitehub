@@ -40,6 +40,8 @@ def generate_html_report(
     days: int,
     output_path: Path,
     location_name: str | None = None,
+    include_thermal: bool = False,
+    thermal_band: str = "ST_B10",
 ) -> None:
     """Generate HTML analysis report for given location.
 
@@ -49,6 +51,8 @@ def generate_html_report(
         days: Number of days to analyze.
         output_path: Path for output HTML file.
         location_name: Optional human-readable location name.
+        include_thermal: Whether to include Landsat thermal analysis.
+        thermal_band: Thermal band to use (ST_B10, B10, or B11).
     """
     print(f"Generating analysis report for ({lat}, {lon})...")
 
@@ -70,6 +74,15 @@ def generate_html_report(
     print("  Fetching weather data...")
     weather_result = location.weather(last_days=days)
 
+    # Thermal analysis (optional)
+    thermal_result = None
+    if include_thermal:
+        print(f"  Running thermal analysis (band: {thermal_band})...")
+        thermal_result = location.thermal_analysis(
+            last_days=max(days, 60),  # Landsat needs longer window
+            thermal_band=thermal_band,
+        )
+
     # Generate chart images to temporary files
     import tempfile
 
@@ -90,6 +103,12 @@ def generate_html_report(
         weather_png = temp_dir / "weather.png"
         weather_result.to_png(weather_png)
         weather_b64 = encode_image_base64(weather_png)
+
+    thermal_b64 = ""
+    if thermal_result is not None and thermal_result.confidence > 0:
+        thermal_png = temp_dir / "thermal.png"
+        thermal_result.to_png(thermal_png)
+        thermal_b64 = encode_image_base64(thermal_png)
 
     # Generate timestamp
     report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -344,6 +363,43 @@ def generate_html_report(
         </div>
 """
 
+    # Thermal section (if available)
+    if thermal_result is not None:
+        if thermal_result.confidence > 0:
+            html += f"""
+        <div class="section" style="border-top: 4px solid #8b4513;">
+            <h2 style="color: #8b4513;">Thermal Analysis (Landsat)</h2>
+            <div class="metrics">
+                <div class="metric">
+                    <div class="value">{thermal_result.mean_temperature:.1f}°C</div>
+                    <div class="label">Mean LST</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{thermal_result.temperature_min:.1f}° - {thermal_result.temperature_max:.1f}°</div>
+                    <div class="label">Temperature Range</div>
+                </div>
+                <div class="metric">
+                    <div class="value">±{thermal_result.temperature_std:.1f}°</div>
+                    <div class="label">Std Deviation</div>
+                </div>
+                <div class="metric">
+                    <div class="value">{thermal_result.confidence:.0%}</div>
+                    <div class="label">Confidence</div>
+                </div>
+            </div>
+            <img src="data:image/png;base64,{thermal_b64}" alt="Thermal Analysis Chart" class="chart">
+        </div>
+"""
+        else:
+            html += """
+        <div class="section" style="border-top: 4px solid #8b4513;">
+            <h2 style="color: #8b4513;">Thermal Analysis (Landsat)</h2>
+            <div class="warning-box">
+                No thermal data available. Try extending the analysis window (Landsat revisit is 16 days).
+            </div>
+        </div>
+"""
+
     # Data quality section
     warnings = []
     if veg_result.warnings:
@@ -352,6 +408,8 @@ def generate_html_report(
         warnings.extend([f"Change: {w}" for w in change_result.warnings])
     if weather_result.warnings:
         warnings.extend([f"Weather: {w}" for w in weather_result.warnings])
+    if thermal_result is not None and thermal_result.warnings:
+        warnings.extend([f"Thermal: {w}" for w in thermal_result.warnings])
 
     change_conf_html = ""
     if change_result is not None:
@@ -361,6 +419,14 @@ def generate_html_report(
                     <span class="value">{change_result.confidence:.0%}</span>
                 </li>"""
 
+    thermal_conf_html = ""
+    if thermal_result is not None:
+        thermal_conf_html = f"""
+                <li>
+                    <span class="label">Thermal Analysis Confidence</span>
+                    <span class="value">{thermal_result.confidence:.0%}</span>
+                </li>"""
+
     html += f"""
         <div class="section">
             <h2>Data Quality</h2>
@@ -368,7 +434,7 @@ def generate_html_report(
                 <li>
                     <span class="label">Vegetation Confidence</span>
                     <span class="value">{veg_result.confidence:.0%}</span>
-                </li>{change_conf_html}
+                </li>{change_conf_html}{thermal_conf_html}
                 <li>
                     <span class="label">Weather Confidence</span>
                     <span class="value">{weather_result.confidence:.0%}</span>
@@ -424,6 +490,7 @@ def main() -> None:
 Examples:
   python run_analysis.py --lat 51.41 --lon 21.97 --days 30 --output report.html
   python run_analysis.py --lat 52.23 --lon 21.01 --days 90 --name "Warsaw" -o warsaw.html
+  python run_analysis.py --lat 52.23 --lon 21.01 --days 60 --include-thermal -o thermal.html
         """,
     )
     parser.add_argument(
@@ -457,6 +524,18 @@ Examples:
         default=None,
         help="Human-readable location name (optional)",
     )
+    parser.add_argument(
+        "--include-thermal",
+        action="store_true",
+        help="Include Landsat thermal analysis (land surface temperature)",
+    )
+    parser.add_argument(
+        "--thermal-band",
+        type=str,
+        default="ST_B10",
+        choices=["ST_B10", "B10", "B11"],
+        help="Thermal band to use (default: ST_B10)",
+    )
 
     args = parser.parse_args()
 
@@ -480,6 +559,8 @@ Examples:
             days=args.days,
             output_path=output_path,
             location_name=args.name,
+            include_thermal=args.include_thermal,
+            thermal_band=args.thermal_band,
         )
     except Exception as e:
         print(f"\nError generating report: {e}")

@@ -14,6 +14,7 @@ from satellitehub.results import (
     BaseResult,
     ChangeResult,
     ResultMetadata,
+    ThermalResult,
     VegetationResult,
     WeatherResult,
 )
@@ -142,6 +143,39 @@ def empty_weather_result() -> WeatherResult:
         mean_temperature=float("nan"),
         total_precipitation=float("nan"),
         observation_count=0,
+    )
+
+
+@pytest.fixture
+def thermal_result(sample_metadata: ResultMetadata) -> ThermalResult:
+    """Create a ThermalResult with sample thermal data."""
+    data = np.random.rand(1, 100, 100).astype(np.float32) * 20 + 15  # 15-35°C
+    return ThermalResult(
+        data=data,
+        confidence=0.78,
+        metadata=sample_metadata,
+        mean_temperature=25.4,
+        temperature_min=18.2,
+        temperature_max=32.8,
+        temperature_std=3.5,
+        thermal_unit="celsius",
+        thermal_band="ST_B10",
+    )
+
+
+@pytest.fixture
+def empty_thermal_result() -> ThermalResult:
+    """Create an empty ThermalResult."""
+    return ThermalResult(
+        data=np.array([], dtype=np.float32),
+        confidence=0.0,
+        metadata=ResultMetadata(),
+        mean_temperature=float("nan"),
+        temperature_min=float("nan"),
+        temperature_max=float("nan"),
+        temperature_std=float("nan"),
+        thermal_unit="celsius",
+        thermal_band="ST_B10",
     )
 
 
@@ -390,6 +424,44 @@ class TestChangeResultToPng:
             assert output_path.exists()
 
 
+# ── ChangeResult.to_html() tests ───────────────────────────────────────────────
+
+
+class TestChangeResultToHtml:
+    """Tests for ChangeResult.to_html()."""
+
+    def test_returns_string(self, change_result: ChangeResult) -> None:
+        """to_html() returns an HTML string when no path given."""
+        html = change_result.to_html()
+        assert isinstance(html, str)
+        assert "<html" in html.lower()
+
+    def test_contains_title(self, change_result: ChangeResult) -> None:
+        """HTML contains result type in title."""
+        html = change_result.to_html()
+        assert "ChangeResult" in html
+
+    def test_contains_confidence(self, change_result: ChangeResult) -> None:
+        """HTML contains confidence value."""
+        html = change_result.to_html()
+        assert "68" in html or "0.68" in html  # 68% or 0.68
+
+    def test_contains_chart_image(self, change_result: ChangeResult) -> None:
+        """HTML contains embedded chart image."""
+        html = change_result.to_html()
+        assert "data:image/png;base64" in html
+
+    def test_writes_to_file(self, change_result: ChangeResult) -> None:
+        """to_html(path) writes HTML to file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "change.html"
+            result_path = change_result.to_html(output_path)
+            assert output_path.exists()
+            assert result_path == output_path
+            content = output_path.read_text()
+            assert "<html" in content.lower()
+
+
 # ── WeatherResult.to_dataframe() tests ────────────────────────────────────────
 
 
@@ -460,6 +532,197 @@ class TestWeatherResultToPng:
             output_path = Path(tmpdir) / "weather.png"
             empty_weather_result.to_png(output_path)
             assert output_path.exists()
+
+
+# ── WeatherResult.to_html() tests ──────────────────────────────────────────────
+
+
+class TestWeatherResultToHtml:
+    """Tests for WeatherResult.to_html()."""
+
+    def test_returns_string(self, weather_result: WeatherResult) -> None:
+        """to_html() returns an HTML string when no path given."""
+        html = weather_result.to_html()
+        assert isinstance(html, str)
+        assert "<html" in html.lower()
+
+    def test_contains_title(self, weather_result: WeatherResult) -> None:
+        """HTML contains result type in title."""
+        html = weather_result.to_html()
+        assert "WeatherResult" in html
+
+    def test_contains_confidence(self, weather_result: WeatherResult) -> None:
+        """HTML contains confidence value."""
+        html = weather_result.to_html()
+        assert "85" in html or "0.85" in html  # 85% or 0.85
+
+    def test_contains_chart_image(self, weather_result: WeatherResult) -> None:
+        """HTML contains embedded chart image."""
+        html = weather_result.to_html()
+        assert "data:image/png;base64" in html
+
+    def test_writes_to_file(self, weather_result: WeatherResult) -> None:
+        """to_html(path) writes HTML to file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "weather.html"
+            result_path = weather_result.to_html(output_path)
+            assert output_path.exists()
+            assert result_path == output_path
+            content = output_path.read_text()
+            assert "<html" in content.lower()
+
+    def test_empty_result_handled(self, empty_weather_result: WeatherResult) -> None:
+        """to_html() handles empty results gracefully."""
+        html = empty_weather_result.to_html()
+        assert isinstance(html, str)
+
+
+# ── ThermalResult.to_dataframe() tests ─────────────────────────────────────────
+
+
+class TestThermalResultToDataFrame:
+    """Tests for ThermalResult.to_dataframe()."""
+
+    def test_returns_dataframe(self, thermal_result: ThermalResult) -> None:
+        """to_dataframe() returns a pandas DataFrame."""
+        df = thermal_result.to_dataframe()
+        assert isinstance(df, pd.DataFrame)
+
+    def test_contains_thermal_fields(self, thermal_result: ThermalResult) -> None:
+        """DataFrame contains thermal-specific fields."""
+        df = thermal_result.to_dataframe()
+        assert "mean_temperature" in df.columns
+        assert "temperature_min" in df.columns
+        assert "temperature_max" in df.columns
+        assert "temperature_std" in df.columns
+        assert "thermal_band" in df.columns
+
+    def test_temperature_values_correct(self, thermal_result: ThermalResult) -> None:
+        """Temperature values in DataFrame match result."""
+        df = thermal_result.to_dataframe()
+        assert df["mean_temperature"].iloc[0] == pytest.approx(25.4)
+        assert df["temperature_min"].iloc[0] == pytest.approx(18.2)
+        assert df["temperature_max"].iloc[0] == pytest.approx(32.8)
+        assert df["temperature_std"].iloc[0] == pytest.approx(3.5)
+
+    def test_contains_thermal_band(self, thermal_result: ThermalResult) -> None:
+        """DataFrame contains thermal band identifier."""
+        df = thermal_result.to_dataframe()
+        assert df["thermal_band"].iloc[0] == "ST_B10"
+
+    def test_contains_confidence(self, thermal_result: ThermalResult) -> None:
+        """DataFrame contains confidence field."""
+        df = thermal_result.to_dataframe()
+        assert "confidence" in df.columns
+        assert df["confidence"].iloc[0] == pytest.approx(0.78)
+
+    def test_empty_result_has_nan_values(
+        self, empty_thermal_result: ThermalResult
+    ) -> None:
+        """Empty thermal result has NaN temperature values."""
+        df = empty_thermal_result.to_dataframe()
+        assert math.isnan(df["mean_temperature"].iloc[0])
+        assert math.isnan(df["temperature_min"].iloc[0])
+        assert math.isnan(df["temperature_max"].iloc[0])
+
+
+# ── ThermalResult.to_png() tests ───────────────────────────────────────────────
+
+
+class TestThermalResultToPng:
+    """Tests for ThermalResult.to_png()."""
+
+    def test_writes_file(self, thermal_result: ThermalResult) -> None:
+        """to_png() writes a file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "thermal.png"
+            result_path = thermal_result.to_png(output_path)
+            assert output_path.exists()
+            assert result_path == output_path
+
+    def test_returns_path_object(self, thermal_result: ThermalResult) -> None:
+        """to_png() returns a Path object."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "thermal.png"
+            result_path = thermal_result.to_png(output_path)
+            assert isinstance(result_path, Path)
+
+    def test_empty_result_handled(self, empty_thermal_result: ThermalResult) -> None:
+        """to_png() handles empty results gracefully."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "thermal.png"
+            empty_thermal_result.to_png(output_path)
+            assert output_path.exists()
+
+
+# ── ThermalResult.to_geotiff() tests ───────────────────────────────────────────
+
+
+class TestThermalResultToGeoTiff:
+    """Tests for ThermalResult.to_geotiff()."""
+
+    def test_writes_file(self, thermal_result: ThermalResult) -> None:
+        """to_geotiff() writes a file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "thermal.tif"
+            result_path = thermal_result.to_geotiff(output_path)
+            assert output_path.exists()
+            assert result_path == output_path
+
+    def test_empty_result_raises_error(
+        self, empty_thermal_result: ThermalResult
+    ) -> None:
+        """to_geotiff() raises ValueError for empty results."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "thermal.tif"
+            with pytest.raises(ValueError, match="empty result"):
+                empty_thermal_result.to_geotiff(output_path)
+
+
+# ── ThermalResult.to_html() tests ──────────────────────────────────────────────
+
+
+class TestThermalResultToHtml:
+    """Tests for ThermalResult.to_html()."""
+
+    def test_returns_string(self, thermal_result: ThermalResult) -> None:
+        """to_html() returns an HTML string when no path given."""
+        html = thermal_result.to_html()
+        assert isinstance(html, str)
+        assert "<html" in html.lower()
+
+    def test_contains_temperature_stats(self, thermal_result: ThermalResult) -> None:
+        """HTML contains temperature statistics."""
+        html = thermal_result.to_html()
+        assert "25.4" in html  # mean temperature
+        assert "18.2" in html  # min temperature
+        assert "32.8" in html  # max temperature
+
+    def test_contains_thermal_band(self, thermal_result: ThermalResult) -> None:
+        """HTML contains thermal band identifier."""
+        html = thermal_result.to_html()
+        assert "ST_B10" in html
+
+    def test_contains_confidence(self, thermal_result: ThermalResult) -> None:
+        """HTML contains confidence value."""
+        html = thermal_result.to_html()
+        assert "78" in html or "0.78" in html  # 78% or 0.78
+
+    def test_writes_to_file(self, thermal_result: ThermalResult) -> None:
+        """to_html(path) writes HTML to file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "thermal.html"
+            result_path = thermal_result.to_html(output_path)
+            assert output_path.exists()
+            assert result_path == output_path
+            content = output_path.read_text()
+            assert "<html" in content.lower()
+
+    def test_empty_result_handled(self, empty_thermal_result: ThermalResult) -> None:
+        """to_html() handles empty results gracefully."""
+        html = empty_thermal_result.to_html()
+        assert isinstance(html, str)
+        assert "no data" in html.lower() or "nan" in html.lower()
 
 
 # ── Edge cases ────────────────────────────────────────────────────────────────

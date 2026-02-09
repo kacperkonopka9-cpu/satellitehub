@@ -465,6 +465,147 @@ class BaseResult:
 
         return path
 
+    def to_html(self, path: str | Path | None = None) -> str | Path:
+        """Export result as a standalone HTML report.
+
+        Generates a self-contained HTML document with embedded visualization
+        (as base64 PNG), key metrics, and metadata. Can either write to a file
+        or return the HTML string.
+
+        Args:
+            path: Output file path. If None, returns HTML as string.
+                If provided, writes to file and returns the Path.
+
+        Returns:
+            HTML string if path is None, otherwise Path to written file.
+
+        Example:
+            >>> result = BaseResult(data=np.random.rand(100, 100))
+            >>> html = result.to_html()  # Returns HTML string
+            >>> result.to_html("report.html")  # Writes to file
+        """
+        import base64
+        import tempfile
+        from datetime import datetime
+
+        # Generate PNG to temp file and encode as base64
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        self.to_png(tmp_path)
+        with open(tmp_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+        tmp_path.unlink()
+
+        # Build location string
+        loc_str = ""
+        bounds = self.metadata.bounds
+        if bounds and {"minx", "miny", "maxx", "maxy"}.issubset(bounds.keys()):
+            lat = (bounds["miny"] + bounds["maxy"]) / 2
+            lon = (bounds["minx"] + bounds["maxx"]) / 2
+            ns = "N" if lat >= 0 else "S"
+            ew = "E" if lon >= 0 else "W"
+            loc_str = f"{abs(lat):.4f}°{ns}, {abs(lon):.4f}°{ew}"
+
+        # Build period string
+        ts = self.metadata.timestamps
+        period_str = ""
+        if ts:
+            period_str = f"{ts[0][:10]} to {ts[-1][:10]}"
+
+        report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cls_name = type(self).__name__
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{cls_name} Report</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            line-height: 1.6; color: #333; max-width: 900px;
+            margin: 0 auto; padding: 20px; background: #f5f5f5;
+        }}
+        .report {{
+            background: white; border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #2c5530, #4a7c59);
+            color: white; padding: 25px; text-align: center;
+        }}
+        .header h1 {{ margin: 0 0 5px; font-size: 24px; }}
+        .header .subtitle {{ opacity: 0.9; font-size: 14px; }}
+        .section {{ padding: 20px 25px; border-bottom: 1px solid #eee; }}
+        .metrics {{
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px; margin: 15px 0;
+        }}
+        .metric {{
+            background: #f8f9fa; padding: 12px; border-radius: 6px; text-align: center;
+        }}
+        .metric .value {{ font-size: 22px; font-weight: bold; color: #2c5530; }}
+        .metric .label {{ font-size: 11px; color: #666; text-transform: uppercase; }}
+        .chart {{ width: 100%; max-width: 750px; margin: 15px auto; display: block; }}
+        .warning {{ background: #fff3cd; padding: 10px 15px; margin: 10px 0;
+            border-left: 4px solid #ffc107; border-radius: 0 4px 4px 0; }}
+        .footer {{ text-align: center; padding: 15px; background: #f8f9fa;
+            color: #666; font-size: 11px; }}
+    </style>
+</head>
+<body>
+<div class="report">
+    <div class="header">
+        <h1>{cls_name}</h1>
+        <div class="subtitle">{loc_str or 'Location not specified'}</div>
+    </div>
+    <div class="section">
+        <div class="metrics">
+            <div class="metric">
+                <div class="value">{self.confidence:.0%}</div>
+                <div class="label">Confidence</div>
+            </div>
+            <div class="metric">
+                <div class="value">{self.metadata.observation_count}</div>
+                <div class="label">Observations</div>
+            </div>
+            <div class="metric">
+                <div class="value">{self.metadata.source or 'N/A'}</div>
+                <div class="label">Source</div>
+            </div>
+            <div class="metric">
+                <div class="value">{period_str or 'N/A'}</div>
+                <div class="label">Period</div>
+            </div>
+        </div>
+        <img src="data:image/png;base64,{img_b64}" alt="Chart" class="chart">
+    </div>
+"""
+
+        # Add warnings if present
+        if self.warnings:
+            html += '    <div class="section">\n'
+            for w in self.warnings:
+                html += f'        <div class="warning">{w}</div>\n'
+            html += "    </div>\n"
+
+        html += f"""    <div class="footer">
+        Generated: {report_time}
+    </div>
+</div>
+</body>
+</html>
+"""
+
+        if path is None:
+            return html
+
+        path = Path(path)
+        path.write_text(html, encoding="utf-8")
+        return path
+
 
 @dataclass
 class VegetationResult(BaseResult):
@@ -676,6 +817,143 @@ class VegetationResult(BaseResult):
         plt.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
+        return path
+
+    def to_html(self, path: str | Path | None = None) -> str | Path:
+        """Export vegetation result as a standalone HTML report.
+
+        Generates a self-contained HTML document with NDVI visualization,
+        vegetation health metrics, and interpretation.
+
+        Args:
+            path: Output file path. If None, returns HTML as string.
+
+        Returns:
+            HTML string if path is None, otherwise Path to written file.
+        """
+        import base64
+        import tempfile
+        from datetime import datetime
+
+        # Generate PNG and encode
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        self.to_png(tmp_path)
+        with open(tmp_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+        tmp_path.unlink()
+
+        # Location and period
+        loc_str = ""
+        bounds = self.metadata.bounds
+        if bounds and {"minx", "miny", "maxx", "maxy"}.issubset(bounds.keys()):
+            lat = (bounds["miny"] + bounds["maxy"]) / 2
+            lon = (bounds["minx"] + bounds["maxx"]) / 2
+            ns = "N" if lat >= 0 else "S"
+            ew = "E" if lon >= 0 else "W"
+            loc_str = f"{abs(lat):.4f}°{ns}, {abs(lon):.4f}°{ew}"
+
+        ts = self.metadata.timestamps
+        period_str = f"{ts[0][:10]} to {ts[-1][:10]}" if ts else "N/A"
+
+        # NDVI interpretation
+        interp = _interpret_ndvi(self.mean_ndvi)
+        ndvi_val = f"{self.mean_ndvi:.2f}" if not math.isnan(self.mean_ndvi) else "N/A"
+        std_val = f"±{self.ndvi_std:.2f}" if not math.isnan(self.ndvi_std) else "N/A"
+        passes_str = f"{self.cloud_free_count}/{self.observation_count}"
+
+        report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vegetation Health Report</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            line-height: 1.6; color: #333; max-width: 900px;
+            margin: 0 auto; padding: 20px; background: #f5f5f5;
+        }}
+        .report {{
+            background: white; border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #2c5530, #4a7c59);
+            color: white; padding: 25px; text-align: center;
+        }}
+        .header h1 {{ margin: 0 0 5px; font-size: 24px; }}
+        .header .subtitle {{ opacity: 0.9; font-size: 14px; }}
+        .section {{ padding: 20px 25px; border-bottom: 1px solid #eee; }}
+        .metrics {{
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px; margin: 15px 0;
+        }}
+        .metric {{
+            background: #f8f9fa; padding: 12px; border-radius: 6px; text-align: center;
+        }}
+        .metric .value {{ font-size: 22px; font-weight: bold; color: #2c5530; }}
+        .metric .label {{ font-size: 11px; color: #666; text-transform: uppercase; }}
+        .status {{
+            display: inline-block; padding: 8px 16px; border-radius: 20px;
+            font-weight: 500; background: #d4edda; color: #155724; margin: 10px 0;
+        }}
+        .chart {{ width: 100%; max-width: 750px; margin: 15px auto; display: block; }}
+        .warning {{ background: #fff3cd; padding: 10px 15px; margin: 10px 0;
+            border-left: 4px solid #ffc107; border-radius: 0 4px 4px 0; }}
+        .footer {{ text-align: center; padding: 15px; background: #f8f9fa;
+            color: #666; font-size: 11px; }}
+    </style>
+</head>
+<body>
+<div class="report">
+    <div class="header">
+        <h1>Vegetation Health Analysis</h1>
+        <div class="subtitle">{loc_str or 'Location not specified'} | {period_str}</div>
+    </div>
+    <div class="section">
+        <div class="status">{interp.title()}</div>
+        <div class="metrics">
+            <div class="metric">
+                <div class="value">{ndvi_val}</div>
+                <div class="label">Mean NDVI</div>
+            </div>
+            <div class="metric">
+                <div class="value">{std_val}</div>
+                <div class="label">Std Deviation</div>
+            </div>
+            <div class="metric">
+                <div class="value">{self.confidence:.0%}</div>
+                <div class="label">Confidence</div>
+            </div>
+            <div class="metric">
+                <div class="value">{passes_str}</div>
+                <div class="label">Cloud-Free</div>
+            </div>
+        </div>
+        <img src="data:image/png;base64,{img_b64}" alt="NDVI Chart" class="chart">
+    </div>
+"""
+        if self.warnings:
+            html += '    <div class="section">\n'
+            for w in self.warnings:
+                html += f'        <div class="warning">{w}</div>\n'
+            html += "    </div>\n"
+
+        html += f"""    <div class="footer">
+        Generated: {report_time}
+    </div>
+</div>
+</body>
+</html>
+"""
+
+        if path is None:
+            return html
+        path = Path(path)
+        path.write_text(html, encoding="utf-8")
         return path
 
 
@@ -1439,4 +1717,147 @@ class ThermalResult(BaseResult):
         plt.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
+        return path
+
+    def to_html(self, path: str | Path | None = None) -> str | Path:
+        """Export thermal result as a standalone HTML report.
+
+        Generates a self-contained HTML document with thermal visualization,
+        temperature statistics, and land surface interpretation.
+
+        Args:
+            path: Output file path. If None, returns HTML as string.
+
+        Returns:
+            HTML string if path is None, otherwise Path to written file.
+        """
+        import base64
+        import tempfile
+        from datetime import datetime
+
+        # Generate PNG and encode
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        self.to_png(tmp_path)
+        with open(tmp_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+        tmp_path.unlink()
+
+        # Location and acquisition time
+        loc_str = ""
+        bounds = self.metadata.bounds
+        if bounds and {"minx", "miny", "maxx", "maxy"}.issubset(bounds.keys()):
+            lat = (bounds["miny"] + bounds["maxy"]) / 2
+            lon = (bounds["minx"] + bounds["maxx"]) / 2
+            ns = "N" if lat >= 0 else "S"
+            ew = "E" if lon >= 0 else "W"
+            loc_str = f"{abs(lat):.4f}°{ns}, {abs(lon):.4f}°{ew}"
+
+        ts = self.metadata.timestamps
+        acq_str = ts[0][:10] if ts else "N/A"
+
+        # Temperature values
+        interp = _interpret_surface_temperature(self.mean_temperature)
+        mean_val = f"{self.mean_temperature:.1f}°C" if not math.isnan(
+            self.mean_temperature
+        ) else "N/A"
+        min_val = f"{self.temperature_min:.1f}°C" if not math.isnan(
+            self.temperature_min
+        ) else "N/A"
+        max_val = f"{self.temperature_max:.1f}°C" if not math.isnan(
+            self.temperature_max
+        ) else "N/A"
+
+        report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Land Surface Temperature Report</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            line-height: 1.6; color: #333; max-width: 900px;
+            margin: 0 auto; padding: 20px; background: #f5f5f5;
+        }}
+        .report {{
+            background: white; border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); overflow: hidden;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #8b4513, #cd853f);
+            color: white; padding: 25px; text-align: center;
+        }}
+        .header h1 {{ margin: 0 0 5px; font-size: 24px; }}
+        .header .subtitle {{ opacity: 0.9; font-size: 14px; }}
+        .section {{ padding: 20px 25px; border-bottom: 1px solid #eee; }}
+        .metrics {{
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px; margin: 15px 0;
+        }}
+        .metric {{
+            background: #f8f9fa; padding: 12px; border-radius: 6px; text-align: center;
+        }}
+        .metric .value {{ font-size: 22px; font-weight: bold; color: #8b4513; }}
+        .metric .label {{ font-size: 11px; color: #666; text-transform: uppercase; }}
+        .status {{
+            display: inline-block; padding: 8px 16px; border-radius: 20px;
+            font-weight: 500; background: #ffe4c4; color: #8b4513; margin: 10px 0;
+        }}
+        .chart {{ width: 100%; max-width: 750px; margin: 15px auto; display: block; }}
+        .warning {{ background: #fff3cd; padding: 10px 15px; margin: 10px 0;
+            border-left: 4px solid #ffc107; border-radius: 0 4px 4px 0; }}
+        .footer {{ text-align: center; padding: 15px; background: #f8f9fa;
+            color: #666; font-size: 11px; }}
+    </style>
+</head>
+<body>
+<div class="report">
+    <div class="header">
+        <h1>Land Surface Temperature</h1>
+        <div class="subtitle">{loc_str or 'Location not specified'} | {acq_str}</div>
+    </div>
+    <div class="section">
+        <div class="status">{interp.title()}</div>
+        <div class="metrics">
+            <div class="metric">
+                <div class="value">{mean_val}</div>
+                <div class="label">Mean Temperature</div>
+            </div>
+            <div class="metric">
+                <div class="value">{min_val}</div>
+                <div class="label">Minimum</div>
+            </div>
+            <div class="metric">
+                <div class="value">{max_val}</div>
+                <div class="label">Maximum</div>
+            </div>
+            <div class="metric">
+                <div class="value">{self.thermal_band or 'N/A'}</div>
+                <div class="label">Thermal Band</div>
+            </div>
+        </div>
+        <img src="data:image/png;base64,{img_b64}" alt="Thermal Chart" class="chart">
+    </div>
+"""
+        if self.warnings:
+            html += '    <div class="section">\n'
+            for w in self.warnings:
+                html += f'        <div class="warning">{w}</div>\n'
+            html += "    </div>\n"
+
+        html += f"""    <div class="footer">
+        Generated: {report_time} | Confidence: {self.confidence:.0%}
+    </div>
+</div>
+</body>
+</html>
+"""
+
+        if path is None:
+            return html
+        path = Path(path)
+        path.write_text(html, encoding="utf-8")
         return path
